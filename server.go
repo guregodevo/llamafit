@@ -114,7 +114,8 @@ func (s *Server) Start(ctx context.Context) error {
 		"--n-gpu-layers", fmt.Sprintf("%d", s.cfg.GPULayers),
 		"--parallel", fmt.Sprintf("%d", s.cfg.Parallel),
 		"--cont-batching",
-		"--flash-attn",
+		"--flash-attn", "auto",
+		"--reasoning-format", "none",
 	}
 
 	mem := s.MemoryEstimate()
