@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func detectDarwinMemory() uint64 {
+func detectTotalMemory() uint64 {
 	out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
 	if err != nil {
 		return 16 * 1024 * 1024 * 1024

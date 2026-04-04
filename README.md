@@ -27,7 +27,7 @@ spartacus --model model.gguf
 spartacus --model model.gguf --inspect
 
 # Custom configuration
-spartacus --model model.gguf --parallel 8 --ctx-size 4096 --port 8080
+spartacus --model model.gguf --parallel 8 --ctx-size 16384 --port 8080
 ```
 
 ### Go API
@@ -48,7 +48,7 @@ defer srv.Stop()
 // Or inspect model without serving
 meta, _ := spartacus.ReadGGUFMetadata("model.gguf")
 fmt.Println(meta.Architecture)    // "gemma4"
-fmt.Println(meta.OptimalSlots(8192, spartacus.AvailableMemory()))  // 16
+fmt.Println(meta.OptimalSlots(16384, spartacus.AvailableMemory()))  // 16
 ```
 
 ## How it works

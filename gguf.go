@@ -4,54 +4,138 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"runtime"
 )
 
 // GGUFMetadata holds model parameters extracted from a GGUF file.
 type GGUFMetadata struct {
-	Architecture string
-	Layers       int
-	EmbeddingDim int
-	HeadCount    int
-	KVHeadCount  int
-	ContextSize  int
-	FileType     int
-	FileSizeBytes int64
+	Architecture   string
+	Layers         int
+	EmbeddingDim   int
+	HeadCount      int
+	KVHeadCount    int
+	ContextSize    int
+	FileType       int
+	FileSizeBytes  int64
+	SlidingWindow  int // SWA window size (0 = no sliding window)
+	SharedKVLayers int // layers sharing KV cache with others
+	KeyLength      int // head dim for non-SWA layers (0 = derive from EmbeddingDim/HeadCount)
+	KeyLengthSWA   int // head dim for SWA layers (0 = same as KeyLength)
+	SWALayerCount  int // number of SWA layers (computed from sliding_window_pattern)
 }
 
-// ModelMemory returns estimated memory usage for a given context size.
-func (m *GGUFMetadata) ModelMemory(ctxSize int) MemoryEstimate {
+// headDimNonSWA returns the K/V head dimension for non-SWA layers.
+func (m *GGUFMetadata) headDimNonSWA() int {
+	if m.KeyLength > 0 {
+		return m.KeyLength
+	}
+	if m.HeadCount == 0 {
+		return 0
+	}
+	return m.EmbeddingDim / m.HeadCount
+}
+
+// headDimSWA returns the K/V head dimension for SWA layers.
+func (m *GGUFMetadata) headDimSWA() int {
+	if m.KeyLengthSWA > 0 {
+		return m.KeyLengthSWA
+	}
+	return m.headDimNonSWA()
+}
+
+// KVBytesPerElement returns the bytes per element for a KV cache type.
+func KVBytesPerElement(cacheType string) float64 {
+	switch cacheType {
+	case "q4_0":
+		return 0.5
+	case "q8_0":
+		return 1.0
+	case "f32":
+		return 4.0
+	default: // f16
+		return 2.0
+	}
+}
+
+// ModelMemory returns estimated memory usage for a given context size and KV cache type.
+func (m *GGUFMetadata) ModelMemory(ctxSize int, kvCacheType ...string) MemoryEstimate {
 	if ctxSize <= 0 {
-		ctxSize = 8192
+		ctxSize = 16384
+	}
+	cacheType := "q8_0"
+	if len(kvCacheType) > 0 && kvCacheType[0] != "" {
+		cacheType = kvCacheType[0]
 	}
 	return MemoryEstimate{
 		ModelBytes:     m.FileSizeBytes,
-		KVPerSlotBytes: m.kvCachePerSlot(ctxSize),
-		OverheadBytes:  200 * 1024 * 1024, // ~200MB for compute buffers
+		KVPerSlotBytes: m.kvCachePerSlot(ctxSize, cacheType),
+		OverheadBytes:  512 * 1024 * 1024, // ~512MB for compute buffers, scratch space
 	}
 }
 
 // kvCachePerSlot calculates KV cache size per slot in bytes.
-// Formula: layers × 2(K+V) × ctx × kv_heads × head_dim × bytes_per_element
-func (m *GGUFMetadata) kvCachePerSlot(ctxSize int) int64 {
+// For models with sliding window attention (e.g., Gemma4), only a subset of
+// layers need full-context KV cache. SWA layers use a small fixed window,
+// and shared KV layers need no cache at all.
+func (m *GGUFMetadata) kvCachePerSlot(ctxSize int, cacheType string) int64 {
 	if m.HeadCount == 0 || m.KVHeadCount == 0 {
 		return 0
 	}
-	headDim := int64(m.EmbeddingDim) / int64(m.HeadCount)
-	// Q8_0 quantization ≈ 1 byte per element
-	// All operands as int64 to avoid overflow
-	return int64(m.Layers) * 2 * int64(ctxSize) * int64(m.KVHeadCount) * headDim
+
+	// No sliding window — all layers use full context
+	if m.SlidingWindow == 0 {
+		headDim := int64(m.headDimNonSWA())
+		elements := int64(m.Layers) * 2 * int64(ctxSize) * int64(m.KVHeadCount) * headDim
+		return int64(float64(elements) * KVBytesPerElement(cacheType))
+	}
+
+	// Sliding window architecture
+	// Shared KV layers are distributed proportionally across SWA and non-SWA layers
+	nonSWATotal := m.Layers - m.SWALayerCount
+	sharedSWA := 0
+	if m.Layers > 0 {
+		sharedSWA = int(math.Round(float64(m.SharedKVLayers) * float64(m.SWALayerCount) / float64(m.Layers)))
+	}
+	sharedNonSWA := m.SharedKVLayers - sharedSWA
+	swaLayers := m.SWALayerCount - sharedSWA
+	nonSWALayers := nonSWATotal - sharedNonSWA
+
+	// Non-SWA layers: full context, uses requested cache type
+	nonSWABytes := int64(0)
+	if nonSWALayers > 0 {
+		headDim := int64(m.headDimNonSWA())
+		elements := int64(nonSWALayers) * 2 * int64(ctxSize) * int64(m.KVHeadCount) * headDim
+		nonSWABytes = int64(float64(elements) * KVBytesPerElement(cacheType))
+	}
+
+	// SWA layers: sliding window context (llama.cpp allocates 2x window), always F16
+	swaBytes := int64(0)
+	if swaLayers > 0 {
+		swaCtx := int64(m.SlidingWindow) * 2
+		headDim := int64(m.headDimSWA())
+		elements := int64(swaLayers) * 2 * swaCtx * int64(m.KVHeadCount) * headDim
+		swaBytes = int64(float64(elements) * KVBytesPerElement("f16"))
+	}
+
+	return nonSWABytes + swaBytes
 }
 
 // OptimalSlots calculates how many parallel slots fit in available memory.
-func (m *GGUFMetadata) OptimalSlots(ctxSize int, availableBytes int64) int {
-	mem := m.ModelMemory(ctxSize)
-	remaining := availableBytes - mem.ModelBytes - mem.OverheadBytes
+func (m *GGUFMetadata) OptimalSlots(ctxSize int, availableBytes int64, kvCacheType ...string) int {
+	cacheType := "q8_0"
+	if len(kvCacheType) > 0 && kvCacheType[0] != "" {
+		cacheType = kvCacheType[0]
+	}
+	mem := m.ModelMemory(ctxSize, cacheType)
+	// Apply 10% safety margin for alignment overhead and runtime allocations
+	safeAvailable := int64(float64(availableBytes) * 0.90)
+	remaining := safeAvailable - mem.ModelBytes - mem.OverheadBytes
 	if remaining <= 0 {
 		return 1
 	}
-	kvPerSlot := m.kvCachePerSlot(ctxSize)
+	kvPerSlot := m.kvCachePerSlot(ctxSize, cacheType)
 	if kvPerSlot <= 0 {
 		return 1
 	}
@@ -59,8 +143,8 @@ func (m *GGUFMetadata) OptimalSlots(ctxSize int, availableBytes int64) int {
 	if slots < 1 {
 		return 1
 	}
-	if slots > 32 {
-		return 32
+	if slots > 256 {
+		return 256
 	}
 	return slots
 }
@@ -86,7 +170,7 @@ func AvailableMemory() int64 {
 	switch runtime.GOOS {
 	case "darwin":
 		// macOS: read hw.memsize
-		total = detectDarwinMemory()
+		total = detectTotalMemory()
 	default:
 		// Fallback: assume 16GB
 		total = 16 * 1024 * 1024 * 1024
@@ -184,6 +268,33 @@ func ReadGGUFMetadata(path string) (*GGUFMetadata, error) {
 		case arch + ".context_length":
 			if v, ok := val.(uint32); ok {
 				meta.ContextSize = int(v)
+			}
+		case arch + ".attention.sliding_window":
+			if v, ok := val.(uint32); ok {
+				meta.SlidingWindow = int(v)
+			}
+		case arch + ".attention.shared_kv_layers":
+			if v, ok := val.(uint32); ok {
+				meta.SharedKVLayers = int(v)
+			}
+		case arch + ".attention.key_length":
+			if v, ok := val.(uint32); ok {
+				meta.KeyLength = int(v)
+			}
+		case arch + ".attention.key_length_swa":
+			if v, ok := val.(uint32); ok {
+				meta.KeyLengthSWA = int(v)
+			}
+		case arch + ".attention.sliding_window_pattern":
+			// Bool array: count SWA layers (true = SWA)
+			if bools, ok := val.([]bool); ok {
+				count := 0
+				for _, isSWA := range bools {
+					if isSWA {
+						count++
+					}
+				}
+				meta.SWALayerCount = count
 			}
 		}
 	}
@@ -285,13 +396,25 @@ func readGGUFValue(r io.Reader, valueType uint32) (interface{}, error) {
 		if err := binary.Read(r, binary.LittleEndian, &count); err != nil {
 			return nil, err
 		}
-		// Skip array contents (we don't need token arrays)
+		// Return bool arrays (needed for sliding_window_pattern)
+		if elemType == ggufTypeBool && count <= 1024 {
+			bools := make([]bool, count)
+			for j := uint64(0); j < count; j++ {
+				var v uint8
+				if err := binary.Read(r, binary.LittleEndian, &v); err != nil {
+					return nil, err
+				}
+				bools[j] = v != 0
+			}
+			return bools, nil
+		}
+		// Skip other array contents
 		for j := uint64(0); j < count; j++ {
 			if _, err := readGGUFValue(r, elemType); err != nil {
 				return nil, err
 			}
 		}
-		return nil, nil // arrays skipped
+		return nil, nil
 	default:
 		return nil, fmt.Errorf("unknown GGUF type: %d", valueType)
 	}

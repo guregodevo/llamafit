@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func detectDarwinMemory() uint64 {
+func detectTotalMemory() uint64 {
 	// On Linux, read /proc/meminfo
 	data, err := os.ReadFile("/proc/meminfo")
 	if err != nil {

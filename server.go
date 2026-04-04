@@ -15,14 +15,15 @@ import (
 
 // Config holds server configuration.
 type Config struct {
-	ModelPath string // Path to GGUF file (required)
-	Host      string // Listen host (default: 127.0.0.1)
-	Port      int    // Listen port (default: 8081)
-	CtxSize   int    // Context size per slot (default: 8192)
-	Parallel  int    // Concurrent slots (0 = auto from GGUF metadata + available RAM)
-	GPULayers int    // Layers offloaded to GPU (default: 99 = all)
-	BinaryPath string // Path to llama-server binary (default: auto-detect)
-	Logger    *slog.Logger
+	ModelPath   string // Path to GGUF file (required)
+	Host        string // Listen host (default: 127.0.0.1)
+	Port        int    // Listen port (default: 8081)
+	CtxSize     int    // Context size per slot (default: 16384)
+	Parallel    int    // Concurrent slots (0 = auto from GGUF metadata + available RAM)
+	GPULayers   int    // Layers offloaded to GPU (0 = auto-fit, 99 = all)
+	KVCacheType string // KV cache quantization type: f16, q8_0, q4_0 (default: q8_0)
+	BinaryPath  string // Path to llama-server binary (default: auto-detect)
+	Logger      *slog.Logger
 }
 
 func (c *Config) defaults() {
@@ -33,10 +34,11 @@ func (c *Config) defaults() {
 		c.Port = 8081
 	}
 	if c.CtxSize == 0 {
-		c.CtxSize = 8192
+		c.CtxSize = 16384
 	}
-	if c.GPULayers == 0 {
-		c.GPULayers = 99
+	// GPULayers 0 = let llama.cpp auto-fit to available memory
+	if c.KVCacheType == "" {
+		c.KVCacheType = "q8_0"
 	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
@@ -72,7 +74,7 @@ func New(cfg Config) (*Server, error) {
 	// Auto-calculate parallel slots from model metadata + available RAM
 	if cfg.Parallel <= 0 {
 		available := AvailableMemory()
-		cfg.Parallel = meta.OptimalSlots(cfg.CtxSize, available)
+		cfg.Parallel = meta.OptimalSlots(cfg.CtxSize, available, cfg.KVCacheType)
 	}
 
 	return &Server{
@@ -89,7 +91,7 @@ func (s *Server) Metadata() *GGUFMetadata {
 
 // MemoryEstimate returns the memory breakdown for the current configuration.
 func (s *Server) MemoryEstimate() MemoryEstimate {
-	return s.meta.ModelMemory(s.cfg.CtxSize)
+	return s.meta.ModelMemory(s.cfg.CtxSize, s.cfg.KVCacheType)
 }
 
 // BaseURL returns the server's API base URL.
@@ -106,16 +108,25 @@ func (s *Server) OpenAIURL() string {
 func (s *Server) Start(ctx context.Context) error {
 	binary := s.resolveBinary()
 
+	// llama-server's --ctx-size is the total context pool, divided across slots
+	totalCtx := s.cfg.CtxSize * s.cfg.Parallel
+
 	args := []string{
 		"--model", s.cfg.ModelPath,
 		"--host", s.cfg.Host,
 		"--port", fmt.Sprintf("%d", s.cfg.Port),
-		"--ctx-size", fmt.Sprintf("%d", s.cfg.CtxSize),
-		"--n-gpu-layers", fmt.Sprintf("%d", s.cfg.GPULayers),
+		"--ctx-size", fmt.Sprintf("%d", totalCtx),
 		"--parallel", fmt.Sprintf("%d", s.cfg.Parallel),
 		"--cont-batching",
 		"--flash-attn", "auto",
+		"--cache-type-k", s.cfg.KVCacheType,
+		"--cache-type-v", s.cfg.KVCacheType,
 		"--reasoning-format", "none",
+	}
+
+	// Only pass --n-gpu-layers if explicitly set (0 = let llama.cpp auto-fit)
+	if s.cfg.GPULayers > 0 {
+		args = append(args, "--n-gpu-layers", fmt.Sprintf("%d", s.cfg.GPULayers))
 	}
 
 	mem := s.MemoryEstimate()
@@ -166,6 +177,7 @@ func (s *Server) Stop() {
 	case <-time.After(5 * time.Second):
 		_ = s.cmd.Process.Kill()
 	}
+	s.cmd = nil
 }
 
 // Wait blocks until the server process exits.
@@ -173,7 +185,9 @@ func (s *Server) Wait() error {
 	if s.cmd == nil {
 		return nil
 	}
-	return s.cmd.Wait()
+	err := s.cmd.Wait()
+	s.cmd = nil
+	return err
 }
 
 func (s *Server) waitHealthy(ctx context.Context) error {
@@ -232,7 +246,7 @@ func SystemInfo() map[string]interface{} {
 		"os":               runtime.GOOS,
 		"arch":             runtime.GOARCH,
 		"cpus":             runtime.NumCPU(),
-		"total_memory":     formatBytes(int64(detectDarwinMemory())),
+		"total_memory":     formatBytes(int64(detectTotalMemory())),
 		"available_memory": formatBytes(AvailableMemory()),
 	}
 }

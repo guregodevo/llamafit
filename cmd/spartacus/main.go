@@ -18,10 +18,11 @@ func main() {
 		host       = flag.String("host", "127.0.0.1", "Listen host")
 		port       = flag.Int("port", 8081, "Listen port")
 		parallel   = flag.Int("parallel", 0, "Concurrent slots (0 = auto)")
-		ctxSize    = flag.Int("ctx-size", 8192, "Context size per slot")
-		gpuLayers  = flag.Int("gpu-layers", 99, "GPU layers (99 = all)")
-		binaryPath = flag.String("binary", "", "Path to llama-server binary")
-		inspect    = flag.Bool("inspect", false, "Print model info and exit")
+		ctxSize    = flag.Int("ctx-size", 16384, "Context size per slot")
+		gpuLayers  = flag.Int("gpu-layers", 0, "GPU layers (0 = auto-fit, 99 = all)")
+		kvCacheType = flag.String("kv-cache-type", "q8_0", "KV cache type: f16, q8_0, q4_0")
+		binaryPath  = flag.String("binary", "", "Path to llama-server binary")
+		inspect     = flag.Bool("inspect", false, "Print model info and exit")
 	)
 	flag.Parse()
 
@@ -44,7 +45,7 @@ func main() {
 	}
 
 	if *inspect {
-		printModelInfo(meta, *ctxSize)
+		printModelInfo(meta, *ctxSize, *kvCacheType)
 		return
 	}
 
@@ -55,8 +56,9 @@ func main() {
 		Port:       *port,
 		Parallel:   *parallel,
 		CtxSize:    *ctxSize,
-		GPULayers:  *gpuLayers,
-		BinaryPath: *binaryPath,
+		GPULayers:   *gpuLayers,
+		KVCacheType: *kvCacheType,
+		BinaryPath:  *binaryPath,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -78,10 +80,10 @@ func main() {
 	fmt.Println("\nShutting down...")
 }
 
-func printModelInfo(meta *spartacus.GGUFMetadata, ctxSize int) {
+func printModelInfo(meta *spartacus.GGUFMetadata, ctxSize int, kvCacheType string) {
 	available := spartacus.AvailableMemory()
-	slots := meta.OptimalSlots(ctxSize, available)
-	mem := meta.ModelMemory(ctxSize)
+	slots := meta.OptimalSlots(ctxSize, available, kvCacheType)
+	mem := meta.ModelMemory(ctxSize, kvCacheType)
 
 	fmt.Printf("Model: %s\n", meta.Architecture)
 	fmt.Printf("Layers: %d\n", meta.Layers)
