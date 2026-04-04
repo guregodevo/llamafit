@@ -1,8 +1,10 @@
 # Spartacus
 
-Go framework for serving GGUF language models via llama.cpp with auto-optimized concurrency.
+Running LLMs locally is powerful but configuring llama.cpp is not — you have to figure out how many parallel users your hardware can handle, how much KV cache to allocate, and what context size won't OOM your machine. Get it wrong and you crash. Get it conservative and you waste half your capacity.
 
-Reads model metadata from the GGUF file to automatically calculate optimal parallel slots based on available system memory.
+Spartacus reads your GGUF model file, detects your available memory, and starts llama.cpp with the optimal configuration. One command, maximum concurrency.
+
+On a 16GB Mac with a 5GB Gemma4 model, Spartacus auto-configures **32 concurrent slots** with full 16K context each — using sliding window detection and Q8_0 KV cache quantization that most manual setups miss.
 
 ## Install
 
@@ -20,13 +22,13 @@ brew install llama.cpp  # macOS
 ### CLI
 
 ```bash
-# Serve a model (auto-detects optimal slots)
+# Serve a model — everything is auto-configured
 spartacus --model model.gguf
 
-# Inspect model and memory estimate
+# See what Spartacus would do before starting
 spartacus --model model.gguf --inspect
 
-# Custom configuration
+# Override if you know better
 spartacus --model model.gguf --parallel 8 --ctx-size 16384 --port 8080
 ```
 
@@ -35,36 +37,29 @@ spartacus --model model.gguf --parallel 8 --ctx-size 16384 --port 8080
 ```go
 import "github.com/guregodevo/spartacus"
 
-// Auto-configure from GGUF metadata
 srv, _ := spartacus.New(spartacus.Config{
     ModelPath: "model.gguf",
     Port:      8081,
 })
 
-// Start serving (OpenAI-compatible API at /v1)
 srv.Start(ctx)
 defer srv.Stop()
-
-// Or inspect model without serving
-meta, _ := spartacus.ReadGGUFMetadata("model.gguf")
-fmt.Println(meta.Architecture)    // "gemma4"
-fmt.Println(meta.OptimalSlots(16384, spartacus.AvailableMemory()))  // 16
 ```
 
-## How it works
+## What it does for you
 
-1. **Reads GGUF metadata** — layers, embedding dim, KV heads, quantization
-2. **Calculates KV cache per slot** — `layers × 2 × ctx × kv_heads × head_dim`
-3. **Detects available RAM** — total memory minus OS reservation
-4. **Auto-configures parallel slots** — `(available - model_size - overhead) / kv_per_slot`
-5. **Starts llama.cpp** with `--parallel N --cont-batching --flash-attn`
+- **Reads the model** — parses GGUF metadata to understand the architecture, layer count, attention heads, and sliding window configuration
+- **Understands your hardware** — detects available memory and reserves what the OS needs
+- **Maximizes concurrency** — calculates the most parallel slots your system can handle without OOM, with a safety margin
+- **Uses the right defaults** — enables Q8_0 KV cache quantization (half the memory, same quality), flash attention, and continuous batching
+- **Handles modern architectures** — detects sliding window attention (Gemma4, etc.) where most layers need far less memory than naive calculations assume, unlocking significantly more concurrent users
 
 ## API
 
 The server exposes llama.cpp's OpenAI-compatible API:
 
 - `POST /v1/chat/completions` — Chat completions
-- `POST /v1/completions` — Text completions  
+- `POST /v1/completions` — Text completions
 - `POST /v1/embeddings` — Embeddings
 - `GET /health` — Health check
 
