@@ -122,6 +122,7 @@ func (s *Server) Start(ctx context.Context) error {
 		"--cache-type-k", s.cfg.KVCacheType,
 		"--cache-type-v", s.cfg.KVCacheType,
 		"--reasoning-format", "none",
+		"--reasoning", "off",
 	}
 
 	// Only pass --n-gpu-layers if explicitly set (0 = let llama.cpp auto-fit)
