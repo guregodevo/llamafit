@@ -20,10 +20,26 @@ type Config struct {
 	Port        int    // Listen port (default: 8081)
 	CtxSize     int    // Context size per slot (default: 16384)
 	Parallel    int    // Concurrent slots (0 = auto from GGUF metadata + available RAM)
-	GPULayers   int    // Layers offloaded to GPU (0 = auto-fit, 99 = all)
+	GPULayers   int    // Layers offloaded to GPU (0 = pick a sensible default via autoGPULayers; 99 = all; pass an explicit non-zero count to override)
 	KVCacheType string // KV cache quantization type: f16, q8_0, q4_0 (default: q8_0)
 	BinaryPath  string // Path to llama-server binary (default: auto-detect)
 	Logger      *slog.Logger
+}
+
+// autoGPULayers picks a default offload count for the host when the
+// caller leaves GPULayers at 0. On macOS, Metal is the only
+// acceleration backend that ships with llama-server and Apple Silicon
+// uses unified memory, so there's no VRAM ceiling to overflow:
+// offloading every layer is always a win and 99 is the llama.cpp
+// convention for "all" (the engine clamps to the model's actual layer
+// count internally). On other platforms we return 0 — historical
+// CPU-only default — until we ship a proper CUDA/ROCm VRAM probe
+// that can decide a safe offload count.
+func autoGPULayers() int {
+	if runtime.GOOS == "darwin" {
+		return 99
+	}
+	return 0
 }
 
 func (c *Config) defaults() {
@@ -36,7 +52,9 @@ func (c *Config) defaults() {
 	if c.CtxSize == 0 {
 		c.CtxSize = 16384
 	}
-	// GPULayers 0 = let llama.cpp auto-fit to available memory
+	if c.GPULayers == 0 {
+		c.GPULayers = autoGPULayers()
+	}
 	if c.KVCacheType == "" {
 		c.KVCacheType = "q8_0"
 	}
@@ -125,7 +143,16 @@ func (s *Server) Start(ctx context.Context) error {
 		"--reasoning", "off",
 	}
 
-	// Only pass --n-gpu-layers if explicitly set (0 = let llama.cpp auto-fit)
+	// --n-gpu-layers controls offload to Metal/CUDA. Pre-autoGPULayers
+	// this code skipped the flag whenever GPULayers was 0 under the
+	// (incorrect) belief that llama.cpp would then auto-fit. It does
+	// not — n_gpu_layers defaults to 0 inside llama-server, meaning
+	// pure CPU inference. defaults() now picks 99 on macOS (Metal /
+	// unified memory: offloading every layer is always the right
+	// move) and leaves 0 elsewhere as the conservative historical
+	// default until we add a VRAM-aware CUDA probe. Skip the flag
+	// only when explicitly zero so llama-server's own CPU path is
+	// taken cleanly.
 	if s.cfg.GPULayers > 0 {
 		args = append(args, "--n-gpu-layers", fmt.Sprintf("%d", s.cfg.GPULayers))
 	}
@@ -137,6 +164,7 @@ func (s *Server) Start(ctx context.Context) error {
 		slog.Int("layers", s.meta.Layers),
 		slog.Int("ctx_size", s.cfg.CtxSize),
 		slog.Int("parallel", s.cfg.Parallel),
+		slog.Int("gpu_layers", s.cfg.GPULayers),
 		slog.String("model_mem", formatBytes(mem.ModelBytes)),
 		slog.String("kv_total", formatBytes(mem.KVPerSlotBytes*int64(s.cfg.Parallel))),
 		slog.String("total_mem", formatBytes(mem.TotalBytes(s.cfg.Parallel))),
