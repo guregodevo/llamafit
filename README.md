@@ -1,70 +1,79 @@
-# Spartacus
+# Llamafit
 
-Running LLMs locally is powerful but configuring llama.cpp is not — you have to figure out how many parallel users your hardware can handle, how much KV cache to allocate, and what context size won't OOM your machine. Get it wrong and you crash. Get it conservative and you waste half your capacity.
+**Go library for programmatically launching tuned llama.cpp servers.**
 
-Spartacus reads your GGUF model file, detects your available memory, and starts llama.cpp with the optimal configuration. One command, maximum concurrency.
-
-On a 16GB Mac with a 5GB Gemma4 model, Spartacus auto-configures **32 concurrent slots** with full 16K context each — using sliding window detection and Q8_0 KV cache quantization that most manual setups miss.
-
-## Install
-
-```bash
-go install github.com/guregodevo/spartacus/cmd/spartacus@latest
-```
-
-Requires `llama-server` (from [llama.cpp](https://github.com/ggml-org/llama.cpp)):
-```bash
-brew install llama.cpp  # macOS
-```
-
-## Usage
-
-### CLI
-
-```bash
-# Serve a model — everything is auto-configured
-spartacus --model model.gguf
-
-# See what Spartacus would do before starting
-spartacus --model model.gguf --inspect
-
-# Override if you know better
-spartacus --model model.gguf --parallel 8 --ctx-size 16384 --port 8080
-
-# Speculative decoding — pair a large model with a small draft for 1.5-2x throughput
-spartacus --model qwen2.5-32b-instruct.gguf --model-draft qwen2.5-0.5b-instruct.gguf
-```
-
-### Go API
+Embedding llama.cpp in a Go application means writing the same hardware-detection, GGUF-parsing, and KV-cache-math boilerplate every time — and getting it subtly wrong every time. Llamafit owns that boilerplate so your application doesn't:
 
 ```go
-import "github.com/guregodevo/spartacus"
+import "github.com/guregodevo/spartacus"  // (rebrand in progress — module path migration pending)
 
-srv, _ := spartacus.New(spartacus.Config{
-    ModelPath: "model.gguf",
-    Port:      8081,
+srv, err := spartacus.New(spartacus.Config{
+    ModelPath: "/path/to/model.gguf",
 })
+if err != nil { return err }
 
-srv.Start(ctx)
+if err := srv.Start(ctx); err != nil { return err }
 defer srv.Stop()
+
+// srv.OpenAIURL() is a live http://127.0.0.1:8081/v1 endpoint
+// — point any OpenAI-compatible client at it.
 ```
+
+That's the whole startup surface. Llamafit reads the GGUF, probes your host, calculates the optimal slot count + context pool + GPU offload, forks `llama-server` with the right flags, and waits for `/health` to come ready before returning.
 
 ## What it does for you
 
-- **Reads the model** — parses GGUF metadata to understand the architecture, layer count, attention heads, and sliding window configuration
-- **Understands your hardware** — detects available memory and reserves what the OS needs
-- **Maximizes concurrency** — calculates the most parallel slots your system can handle without OOM, with a safety margin
-- **Uses the right defaults** — enables Q8_0 KV cache quantization (half the memory, same quality), flash attention, and continuous batching
-- **Handles modern architectures** — detects sliding window attention (Gemma4, etc.) where most layers need far less memory than naive calculations assume, unlocking significantly more concurrent users
+- **Parses GGUF metadata** — architecture, layer count, attention heads, sliding-window detection (Gemma4, Mistral). No need to hardcode model-specific knobs.
+- **Probes host memory** — reserves what the OS needs, then sizes parallel slots to fit the rest.
+- **Picks the right llama-server flags** — Q8_0 KV cache quantization, flash attention, continuous batching, Metal/CUDA offload tuned to platform.
+- **Handles lifecycle** — `Start` blocks until healthy, `Stop` shuts down cleanly, `Wait` joins the subprocess. Safe to embed in a server's graceful-shutdown path.
+- **Supports speculative decoding** — set `Config.DraftModelPath` to pair a small draft model with the main; llamafit hands llama-server `--model-draft` and mirrors GPU offload for 1.5-3x decode throughput on long generation.
 
-## API
+## Config
 
-The server exposes llama.cpp's OpenAI-compatible API:
+```go
+type Config struct {
+    ModelPath      string        // Path to GGUF file (required)
+    Host           string        // Listen host         (default 127.0.0.1)
+    Port           int           // Listen port         (default 8081)
+    CtxSize        int           // Per-slot context    (default 16384)
+    Parallel       int           // Concurrent slots    (0 = auto from GGUF + RAM)
+    GPULayers      int           // Layers offloaded    (0 = platform default; 99 = all)
+    KVCacheType    string        // f16 | q8_0 | q4_0   (default q8_0)
+    DraftModelPath string        // Optional draft GGUF for speculative decoding
+    BinaryPath     string        // llama-server path   (default auto-detect)
+    Logger         *slog.Logger
+}
+```
 
-- `POST /v1/chat/completions` — Chat completions
-- `POST /v1/completions` — Text completions
-- `POST /v1/embeddings` — Embeddings
-- `GET /health` — Health check
+Every field has a sensible auto default. Leave a field zero and llamafit picks for you.
+
+## Server methods
+
+- `New(cfg Config) (*Server, error)` — validate config, parse GGUF, prepare to run.
+- `Start(ctx context.Context) error` — fork llama-server, block until `/health` is ready.
+- `Stop()` — graceful SIGINT, escalates to SIGKILL after 5s. Idempotent.
+- `Wait() error` — block until the subprocess exits (use in long-running embedders).
+- `BaseURL() / OpenAIURL()` — endpoints to hand downstream HTTP clients.
+- `Metadata() / MemoryEstimate()` — introspect the loaded model without serving.
+
+## Served API
+
+The forked llama-server exposes the standard OpenAI-compatible surface:
+
+- `POST /v1/chat/completions`
+- `POST /v1/completions`
+- `POST /v1/embeddings`
+- `GET  /health`
+
+## Requirements
+
+A `llama-server` binary on `PATH` (or pointed at via `Config.BinaryPath`):
+
+```bash
+brew install llama.cpp        # macOS
+# or build from https://github.com/ggml-org/llama.cpp
+```
 
 ## License
 
