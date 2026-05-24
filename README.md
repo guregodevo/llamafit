@@ -59,6 +59,30 @@ Every field has a sensible auto default. Leave a field zero and llamafit picks f
 - `BaseURL() / OpenAIURL()` — endpoints to hand downstream HTTP clients.
 - `Metadata() / MemoryEstimate()` — introspect the loaded model without serving.
 
+## For long-running embedders: Runner
+
+`Server` is fine for one-shot use, but if you're embedding Llamafit in a daemon (HTTP gateway, agent runtime, etc.) you usually want lazy start, idempotent re-entry from concurrent callers, model swap when the config changes, and a single graceful-shutdown hook. `Runner` is that:
+
+```go
+var runner = llamafit.NewRunner()
+
+func handler(w http.ResponseWriter, r *http.Request) {
+    baseURL, err := runner.EnsureRunning(r.Context(), llamafit.Config{
+        ModelPath: "/path/to/qwen2.5-7b.gguf",
+    })
+    if err != nil { http.Error(w, err.Error(), 500); return }
+    // baseURL is the OAI endpoint — hand to your LLM client.
+}
+
+func shutdown() { runner.Stop() }
+```
+
+- First `EnsureRunning` call starts the server. Subsequent calls with the same `ModelPath` + `DraftModelPath` are no-ops.
+- Different `ModelPath` or `DraftModelPath` triggers a clean model swap.
+- Concurrent callers serialize on an internal mutex — only one startup ever in flight.
+- The passed ctx controls readiness wait only; the subprocess outlives the request and runs until `Stop()`.
+- `runner.Status()` returns a snapshot for `/health` endpoints or operator status commands.
+
 ## Served API
 
 The forked llama-server exposes the standard OpenAI-compatible surface:
