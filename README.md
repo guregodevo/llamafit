@@ -1,6 +1,8 @@
 # Llamafit
 
-**Go library for programmatically launching tuned llama.cpp servers.**
+**Make llama.cpp fit your machine.**
+
+A Go library for programmatically launching tuned llama.cpp servers. Llamafit reads your GGUF, probes your host, and forks `llama-server` with the right flags so you stop hand-tuning context size, slot count, and GPU offload every time you embed a model.
 
 Embedding llama.cpp in a Go application means writing the same hardware-detection, GGUF-parsing, and KV-cache-math boilerplate every time — and getting it subtly wrong every time. Llamafit owns that boilerplate so your application doesn't:
 
