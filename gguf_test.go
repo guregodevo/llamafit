@@ -1,4 +1,4 @@
-package spartacus
+package llamafit
 
 import (
 	"math"
@@ -7,10 +7,10 @@ import (
 )
 
 func testGGUFPath(t *testing.T) string {
-	if p := os.Getenv("SPARTACUS_TEST_GGUF"); p != "" {
+	if p := os.Getenv("LLAMAFIT_TEST_GGUF"); p != "" {
 		return p
 	}
-	t.Skip("set SPARTACUS_TEST_GGUF to a .gguf file path to run this test")
+	t.Skip("set LLAMAFIT_TEST_GGUF to a .gguf file path to run this test")
 	return ""
 }
 

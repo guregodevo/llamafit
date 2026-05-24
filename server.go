@@ -1,4 +1,4 @@
-package spartacus
+package llamafit
 
 import (
 	"context"
@@ -109,7 +109,7 @@ func New(cfg Config) (*Server, error) {
 	return &Server{
 		cfg:  cfg,
 		meta: meta,
-		log:  cfg.Logger.With("component", "spartacus"),
+		log:  cfg.Logger.With("component", "llamafit"),
 	}, nil
 }
 

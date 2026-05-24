@@ -1,4 +1,4 @@
-package spartacus
+package llamafit
 
 import (
 	"slices"

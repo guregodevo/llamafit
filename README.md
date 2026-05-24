@@ -5,9 +5,9 @@
 Embedding llama.cpp in a Go application means writing the same hardware-detection, GGUF-parsing, and KV-cache-math boilerplate every time — and getting it subtly wrong every time. Llamafit owns that boilerplate so your application doesn't:
 
 ```go
-import "github.com/guregodevo/spartacus"  // (rebrand in progress — module path migration pending)
+import "github.com/guregodevo/llamafit"
 
-srv, err := spartacus.New(spartacus.Config{
+srv, err := llamafit.New(llamafit.Config{
     ModelPath: "/path/to/model.gguf",
 })
 if err != nil { return err }

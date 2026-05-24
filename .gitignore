@@ -27,9 +27,9 @@ go.work.sum
 # env file
 .env
 # Built binary at repo root — leading slash so this doesn't shadow the
-# cmd/spartacus/ source directory (gitignore matches any path component
+# cmd/llamafit/ source directory (gitignore matches any path component
 # of a bare name).
-/spartacus
+/llamafit
 # Editor/IDE
 # .idea/
 # .vscode/

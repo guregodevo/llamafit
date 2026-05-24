@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/guregodevo/spartacus"
+	"github.com/guregodevo/llamafit"
 )
 
 func main() {
@@ -28,18 +28,18 @@ func main() {
 	flag.Parse()
 
 	if *modelPath == "" {
-		fmt.Fprintf(os.Stderr, "Usage: spartacus --model <path.gguf>\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: llamafit --model <path.gguf>\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  spartacus --model model.gguf                    # auto-detect slots\n")
-		fmt.Fprintf(os.Stderr, "  spartacus --model model.gguf --parallel 8        # force 8 slots\n")
-		fmt.Fprintf(os.Stderr, "  spartacus --model model.gguf --inspect           # print model info\n")
+		fmt.Fprintf(os.Stderr, "  llamafit --model model.gguf                    # auto-detect slots\n")
+		fmt.Fprintf(os.Stderr, "  llamafit --model model.gguf --parallel 8        # force 8 slots\n")
+		fmt.Fprintf(os.Stderr, "  llamafit --model model.gguf --inspect           # print model info\n")
 		os.Exit(1)
 	}
 
 	// Read model metadata
-	meta, err := spartacus.ReadGGUFMetadata(*modelPath)
+	meta, err := llamafit.ReadGGUFMetadata(*modelPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading model: %v\n", err)
 		os.Exit(1)
@@ -51,7 +51,7 @@ func main() {
 	}
 
 	// Create server
-	srv, err := spartacus.New(spartacus.Config{
+	srv, err := llamafit.New(llamafit.Config{
 		ModelPath:  *modelPath,
 		Host:       *host,
 		Port:       *port,
@@ -82,8 +82,8 @@ func main() {
 	fmt.Println("\nShutting down...")
 }
 
-func printModelInfo(meta *spartacus.GGUFMetadata, ctxSize int, kvCacheType string) {
-	available := spartacus.AvailableMemory()
+func printModelInfo(meta *llamafit.GGUFMetadata, ctxSize int, kvCacheType string) {
+	available := llamafit.AvailableMemory()
 	slots := meta.OptimalSlots(ctxSize, available, kvCacheType)
 	mem := meta.ModelMemory(ctxSize, kvCacheType)
 
@@ -95,7 +95,7 @@ func printModelInfo(meta *spartacus.GGUFMetadata, ctxSize int, kvCacheType strin
 	fmt.Printf("File size: %.1f GB\n", float64(meta.FileSizeBytes)/(1024*1024*1024))
 	fmt.Println()
 
-	sys := spartacus.SystemInfo()
+	sys := llamafit.SystemInfo()
 	fmt.Printf("System: %s/%s, %d CPUs, %s RAM (%s available)\n",
 		sys["os"], sys["arch"], sys["cpus"], sys["total_memory"], sys["available_memory"])
 	fmt.Println()
