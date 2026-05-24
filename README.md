@@ -30,6 +30,9 @@ spartacus --model model.gguf --inspect
 
 # Override if you know better
 spartacus --model model.gguf --parallel 8 --ctx-size 16384 --port 8080
+
+# Speculative decoding — pair a large model with a small draft for 1.5-2x throughput
+spartacus --model qwen2.5-32b-instruct.gguf --model-draft qwen2.5-0.5b-instruct.gguf
 ```
 
 ### Go API

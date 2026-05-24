@@ -23,7 +23,18 @@ type Config struct {
 	GPULayers   int    // Layers offloaded to GPU (0 = pick a sensible default via autoGPULayers; 99 = all; pass an explicit non-zero count to override)
 	KVCacheType string // KV cache quantization type: f16, q8_0, q4_0 (default: q8_0)
 	BinaryPath  string // Path to llama-server binary (default: auto-detect)
-	Logger      *slog.Logger
+	// DraftModelPath enables speculative decoding when set. The draft
+	// model proposes tokens that the main model verifies in batch — for
+	// sequential decoding workloads on the same GPU, this typically
+	// gives 1.5-2x throughput at the cost of a small extra resident
+	// model in memory. Must share the main model's vocabulary; the
+	// natural pairing is a same-family Q4 model 10-50x smaller (e.g.
+	// Qwen2.5-0.5B-Instruct as the draft for Qwen2.5-32B-Instruct).
+	// When GPULayers > 0, the draft model offloads to the same backend.
+	// Default (empty) disables speculative decoding — pure single-model
+	// inference, behavior unchanged from older callers.
+	DraftModelPath string
+	Logger         *slog.Logger
 }
 
 // autoGPULayers picks a default offload count for the host when the
@@ -125,8 +136,48 @@ func (s *Server) OpenAIURL() string {
 // Start launches the llama.cpp server and waits for it to be healthy.
 func (s *Server) Start(ctx context.Context) error {
 	binary := s.resolveBinary()
+	args := s.buildArgs()
 
-	// llama-server's --ctx-size is the total context pool, divided across slots
+	mem := s.MemoryEstimate()
+	s.log.Info("starting server",
+		slog.String("model", filepath.Base(s.cfg.ModelPath)),
+		slog.String("arch", s.meta.Architecture),
+		slog.Int("layers", s.meta.Layers),
+		slog.Int("ctx_size", s.cfg.CtxSize),
+		slog.Int("parallel", s.cfg.Parallel),
+		slog.Int("gpu_layers", s.cfg.GPULayers),
+		slog.String("draft_model", draftLogValue(s.cfg.DraftModelPath)),
+		slog.String("model_mem", formatBytes(mem.ModelBytes)),
+		slog.String("kv_total", formatBytes(mem.KVPerSlotBytes*int64(s.cfg.Parallel))),
+		slog.String("total_mem", formatBytes(mem.TotalBytes(s.cfg.Parallel))),
+	)
+
+	s.cmd = exec.CommandContext(ctx, binary, args...)
+	s.cmd.Stdout = os.Stdout
+	s.cmd.Stderr = os.Stderr
+
+	if err := s.cmd.Start(); err != nil {
+		return fmt.Errorf("start llama-server: %w", err)
+	}
+
+	if err := s.waitHealthy(ctx); err != nil {
+		s.Stop()
+		return fmt.Errorf("server failed to become healthy: %w", err)
+	}
+
+	s.log.Info("server ready",
+		slog.String("url", s.OpenAIURL()),
+		slog.Int("parallel_slots", s.cfg.Parallel),
+	)
+	return nil
+}
+
+// buildArgs constructs the llama-server argv from the server's
+// config. Extracted from Start so the argv shape is unit-testable
+// without spinning up a real subprocess.
+func (s *Server) buildArgs() []string {
+	// llama-server's --ctx-size is the total context pool, divided
+	// across slots.
 	totalCtx := s.cfg.CtxSize * s.cfg.Parallel
 
 	args := []string{
@@ -157,37 +208,19 @@ func (s *Server) Start(ctx context.Context) error {
 		args = append(args, "--n-gpu-layers", fmt.Sprintf("%d", s.cfg.GPULayers))
 	}
 
-	mem := s.MemoryEstimate()
-	s.log.Info("starting server",
-		slog.String("model", filepath.Base(s.cfg.ModelPath)),
-		slog.String("arch", s.meta.Architecture),
-		slog.Int("layers", s.meta.Layers),
-		slog.Int("ctx_size", s.cfg.CtxSize),
-		slog.Int("parallel", s.cfg.Parallel),
-		slog.Int("gpu_layers", s.cfg.GPULayers),
-		slog.String("model_mem", formatBytes(mem.ModelBytes)),
-		slog.String("kv_total", formatBytes(mem.KVPerSlotBytes*int64(s.cfg.Parallel))),
-		slog.String("total_mem", formatBytes(mem.TotalBytes(s.cfg.Parallel))),
-	)
-
-	s.cmd = exec.CommandContext(ctx, binary, args...)
-	s.cmd.Stdout = os.Stdout
-	s.cmd.Stderr = os.Stderr
-
-	if err := s.cmd.Start(); err != nil {
-		return fmt.Errorf("start llama-server: %w", err)
+	// Speculative decoding: hand llama-server the draft model and
+	// mirror the main model's GPU offload so both run on the same
+	// backend. llama.cpp's defaults for --draft-max / --draft-min /
+	// --draft-p-min (16 / 5 / 0.75) work well for instruction-tuned
+	// model pairs; expose them only if tuning becomes load-bearing.
+	if s.cfg.DraftModelPath != "" {
+		args = append(args, "--model-draft", s.cfg.DraftModelPath)
+		if s.cfg.GPULayers > 0 {
+			args = append(args, "--n-gpu-layers-draft", fmt.Sprintf("%d", s.cfg.GPULayers))
+		}
 	}
 
-	if err := s.waitHealthy(ctx); err != nil {
-		s.Stop()
-		return fmt.Errorf("server failed to become healthy: %w", err)
-	}
-
-	s.log.Info("server ready",
-		slog.String("url", s.OpenAIURL()),
-		slog.Int("parallel_slots", s.cfg.Parallel),
-	)
-	return nil
+	return args
 }
 
 // Stop gracefully shuts down the server.
@@ -278,6 +311,16 @@ func SystemInfo() map[string]interface{} {
 		"total_memory":     formatBytes(int64(detectTotalMemory())),
 		"available_memory": formatBytes(AvailableMemory()),
 	}
+}
+
+// draftLogValue renders the draft model for structured logs. Empty
+// when speculative decoding is disabled (filepath.Base("") returns
+// ".", which would log misleadingly).
+func draftLogValue(p string) string {
+	if p == "" {
+		return ""
+	}
+	return filepath.Base(p)
 }
 
 func formatBytes(b int64) string {

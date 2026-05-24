@@ -4,7 +4,11 @@ PORT  ?= 8081
 .PHONY: build serve inspect test clean
 
 build:
-	go build -o spartacus ./cmd/spartacus
+	# -buildvcs=false avoids `bad CPU type in executable` when an x86_64
+	# Homebrew git lands first on PATH on Apple Silicon. VCS stamping
+	# isn't load-bearing (the module proxy carries the source hash) and
+	# skipping it lets the build succeed cleanly on every Mac.
+	go build -buildvcs=false -o spartacus ./cmd/spartacus
 
 serve: build
 ifndef MODEL

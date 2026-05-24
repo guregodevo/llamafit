@@ -22,6 +22,7 @@ func main() {
 		gpuLayers  = flag.Int("gpu-layers", 0, "GPU layers (0 = auto-fit, 99 = all)")
 		kvCacheType = flag.String("kv-cache-type", "q8_0", "KV cache type: f16, q8_0, q4_0")
 		binaryPath  = flag.String("binary", "", "Path to llama-server binary")
+		draftModel  = flag.String("model-draft", "", "Optional draft GGUF for speculative decoding (1.5-2x throughput; must share main model's vocab)")
 		inspect     = flag.Bool("inspect", false, "Print model info and exit")
 	)
 	flag.Parse()
@@ -56,9 +57,10 @@ func main() {
 		Port:       *port,
 		Parallel:   *parallel,
 		CtxSize:    *ctxSize,
-		GPULayers:   *gpuLayers,
-		KVCacheType: *kvCacheType,
-		BinaryPath:  *binaryPath,
+		GPULayers:      *gpuLayers,
+		KVCacheType:    *kvCacheType,
+		BinaryPath:     *binaryPath,
+		DraftModelPath: *draftModel,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
