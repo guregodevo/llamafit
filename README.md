@@ -83,6 +83,22 @@ func shutdown() { runner.Stop() }
 - The passed ctx controls readiness wait only; the subprocess outlives the request and runs until `Stop()`.
 - `runner.Status()` returns a snapshot for `/health` endpoints or operator status commands.
 
+## Model selection helpers
+
+If your app keeps multiple GGUFs in a directory (e.g. a `~/.yourapp/models/` cache) and wants to auto-pick the main + draft, Llamafit has two helpers so you don't reimplement them:
+
+```go
+mainPath, err := llamafit.PickModel("/Users/me/.yourapp/models")
+// → largest .gguf in the dir, or error when none
+
+draftPath := llamafit.PickDraftModel(mainPath, "/Users/me/.yourapp/models",
+    llamafit.DefaultDraftHeadroom)
+// → largest .gguf ≤ 1/3 the size of main, "" when nothing qualifies
+//   or when (main + draft + 8 GiB) would exceed AvailableMemory()
+```
+
+The memory guard on `PickDraftModel` is the load-bearing bit: on a thrashing host, speculative decoding inverts into a 4-8x slowdown (observed: 16 GB Mac with 7B + 1.5B paired, ~80 MB free). Pass `0` for the headroom to disable the guard on dedicated inference hosts.
+
 ## Served API
 
 The forked llama-server exposes the standard OpenAI-compatible surface:
