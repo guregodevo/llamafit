@@ -2,6 +2,7 @@ package llamafit
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -52,5 +53,74 @@ func TestBuildArgs_DraftModel(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestBuildArgs_EmbeddingMode covers the embedding-server argv path:
+// --embeddings replaces --reasoning* flags; --model-draft is never
+// emitted regardless of DraftModelPath (New() rejects that combo,
+// but buildArgs still skips defensively).
+func TestBuildArgs_EmbeddingMode(t *testing.T) {
+	s := &Server{cfg: Config{
+		ModelPath:   "/models/bge-m3.gguf",
+		Host:        "127.0.0.1",
+		Port:        8082,
+		CtxSize:     8192,
+		Parallel:    1,
+		GPULayers:   99,
+		KVCacheType: "q8_0",
+		Embeddings:  true,
+	}}
+	args := s.buildArgs()
+
+	if !slices.Contains(args, "--embeddings") {
+		t.Errorf("--embeddings missing in embedding-mode args: %v", args)
+	}
+	if slices.Contains(args, "--reasoning-format") || slices.Contains(args, "--reasoning") {
+		t.Errorf("--reasoning* flags leaked into embedding-mode args: %v", args)
+	}
+	if slices.Contains(args, "--model-draft") {
+		t.Errorf("--model-draft leaked into embedding-mode args: %v", args)
+	}
+	if !slices.Contains(args, "--pooling") {
+		t.Errorf("--pooling missing in embedding-mode args: %v", args)
+	}
+}
+
+// TestBuildArgs_ChatMode confirms the inverse: chat mode emits
+// --reasoning* and does NOT emit --embeddings.
+func TestBuildArgs_ChatMode(t *testing.T) {
+	s := &Server{cfg: Config{
+		ModelPath:   "/models/qwen-7b.gguf",
+		Host:        "127.0.0.1",
+		Port:        8081,
+		CtxSize:     4096,
+		Parallel:    4,
+		GPULayers:   99,
+		KVCacheType: "q8_0",
+	}}
+	args := s.buildArgs()
+
+	if slices.Contains(args, "--embeddings") {
+		t.Errorf("--embeddings leaked into chat-mode args: %v", args)
+	}
+	if !slices.Contains(args, "--reasoning-format") || !slices.Contains(args, "--reasoning") {
+		t.Errorf("--reasoning* flags missing from chat-mode args: %v", args)
+	}
+}
+
+// TestNew_RejectsEmbeddingsWithDraft is the belt-and-suspenders
+// check matching the doc comment on Config.Embeddings.
+func TestNew_RejectsEmbeddingsWithDraft(t *testing.T) {
+	_, err := New(Config{
+		ModelPath:      "/does/not/exist.gguf",
+		Embeddings:     true,
+		DraftModelPath: "/also/missing.gguf",
+	})
+	if err == nil {
+		t.Fatal("New(Embeddings+DraftModelPath) returned nil error")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error = %q, want it to mention mutual exclusion", err)
 	}
 }

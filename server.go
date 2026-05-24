@@ -34,7 +34,24 @@ type Config struct {
 	// Default (empty) disables speculative decoding — pure single-model
 	// inference, behavior unchanged from older callers.
 	DraftModelPath string
-	Logger         *slog.Logger
+	// Embeddings switches the server into embedding-service mode:
+	// llama-server is launched with --embeddings, exposes /v1/embeddings,
+	// and DOES NOT serve /v1/chat/completions. The model must be a
+	// dedicated embedding model (bge-m3, nomic-embed-text, e5-*, etc.) —
+	// pointing this at a causal chat model produces unusable vectors
+	// (raw final-token hidden states, not pooled embeddings).
+	//
+	// Mutually exclusive with DraftModelPath: speculative decoding has
+	// no meaning for embedding generation. New() returns an error when
+	// both are set.
+	//
+	// Typical setup: one Runner with Embeddings=false on port 8081
+	// (chat) + a second Runner with Embeddings=true on port 8082
+	// (embeddings). Apple Silicon's unified memory + llama.cpp's Metal
+	// backend handle both subprocesses concurrently with no special
+	// scheduling.
+	Embeddings bool
+	Logger     *slog.Logger
 }
 
 // autoGPULayers picks a default offload count for the host when the
@@ -89,6 +106,9 @@ func New(cfg Config) (*Server, error) {
 
 	if cfg.ModelPath == "" {
 		return nil, fmt.Errorf("model path is required")
+	}
+	if cfg.Embeddings && cfg.DraftModelPath != "" {
+		return nil, fmt.Errorf("Config.Embeddings and Config.DraftModelPath are mutually exclusive (speculative decoding doesn't apply to embedding generation)")
 	}
 	if _, err := os.Stat(cfg.ModelPath); err != nil {
 		return nil, fmt.Errorf("model not found: %s", cfg.ModelPath)
@@ -190,8 +210,17 @@ func (s *Server) buildArgs() []string {
 		"--flash-attn", "auto",
 		"--cache-type-k", s.cfg.KVCacheType,
 		"--cache-type-v", s.cfg.KVCacheType,
-		"--reasoning-format", "none",
-		"--reasoning", "off",
+	}
+
+	if s.cfg.Embeddings {
+		// Embedding mode: enable the /v1/embeddings endpoint. llama-server
+		// rejects --reasoning* flags in this mode, and chat/completion
+		// endpoints aren't served.
+		args = append(args, "--embeddings", "--pooling", "mean")
+	} else {
+		// Chat mode: kill the model's <think> tags from output so
+		// downstream OAI clients don't have to strip them.
+		args = append(args, "--reasoning-format", "none", "--reasoning", "off")
 	}
 
 	// --n-gpu-layers controls offload to Metal/CUDA. Pre-autoGPULayers
@@ -213,7 +242,8 @@ func (s *Server) buildArgs() []string {
 	// backend. llama.cpp's defaults for --draft-max / --draft-min /
 	// --draft-p-min (16 / 5 / 0.75) work well for instruction-tuned
 	// model pairs; expose them only if tuning becomes load-bearing.
-	if s.cfg.DraftModelPath != "" {
+	// Skipped in embedding mode — New() already rejects that combo.
+	if !s.cfg.Embeddings && s.cfg.DraftModelPath != "" {
 		args = append(args, "--model-draft", s.cfg.DraftModelPath)
 		if s.cfg.GPULayers > 0 {
 			args = append(args, "--n-gpu-layers-draft", fmt.Sprintf("%d", s.cfg.GPULayers))
