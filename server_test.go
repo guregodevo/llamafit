@@ -109,6 +109,44 @@ func TestBuildArgs_ChatMode(t *testing.T) {
 	}
 }
 
+// TestBuildArgs_CacheReuse covers --cache-reuse for cross-slot prefix
+// sharing: emitted in chat mode (stable 5-10K-token agent system
+// prompts dominate prefill cost), skipped in embedding mode (one-shot,
+// no reuse opportunity).
+func TestBuildArgs_CacheReuse(t *testing.T) {
+	chat := &Server{cfg: Config{
+		ModelPath:   "/models/qwen-7b.gguf",
+		Host:        "127.0.0.1",
+		Port:        8081,
+		CtxSize:     4096,
+		Parallel:    4,
+		GPULayers:   99,
+		KVCacheType: "q8_0",
+	}}
+	args := chat.buildArgs()
+	idx := slices.Index(args, "--cache-reuse")
+	if idx < 0 {
+		t.Fatalf("--cache-reuse missing from chat-mode args: %v", args)
+	}
+	if idx+1 >= len(args) || args[idx+1] != "256" {
+		t.Errorf("--cache-reuse value = %q, want %q", args[idx+1], "256")
+	}
+
+	embed := &Server{cfg: Config{
+		ModelPath:   "/models/bge-m3.gguf",
+		Host:        "127.0.0.1",
+		Port:        8082,
+		CtxSize:     8192,
+		Parallel:    1,
+		GPULayers:   99,
+		KVCacheType: "q8_0",
+		Embeddings:  true,
+	}}
+	if slices.Contains(embed.buildArgs(), "--cache-reuse") {
+		t.Errorf("--cache-reuse leaked into embedding-mode args: %v", embed.buildArgs())
+	}
+}
+
 // TestNew_RejectsEmbeddingsWithDraft is the belt-and-suspenders
 // check matching the doc comment on Config.Embeddings.
 func TestNew_RejectsEmbeddingsWithDraft(t *testing.T) {

@@ -221,6 +221,21 @@ func (s *Server) buildArgs() []string {
 		// Chat mode: kill the model's <think> tags from output so
 		// downstream OAI clients don't have to strip them.
 		args = append(args, "--reasoning-format", "none", "--reasoning", "off")
+		// --cache-reuse N enables cross-slot prefix sharing: when a
+		// request lands on a slot whose KV cache holds a different
+		// suffix, llama-server can still reuse already-computed
+		// 256-token chunks from any slot whose cache shares the
+		// prefix. Without this, agent workloads with a stable 5-10K
+		// token system prompt re-prefill the prompt every time the
+		// scheduler hands the request to a different slot — the
+		// dominant cost for short-output agent calls.
+		//
+		// 256 is the llama.cpp project's default chunk granularity:
+		// small enough to find matches when prompts diverge mid-way,
+		// large enough that the bookkeeping overhead stays in the
+		// noise. Embedding mode is excluded because the embed server
+		// processes inputs one-shot and never benefits from reuse.
+		args = append(args, "--cache-reuse", "256")
 	}
 
 	// --n-gpu-layers controls offload to Metal/CUDA. Pre-autoGPULayers
