@@ -65,7 +65,12 @@ type Config struct {
 	// optimization (both subtracted from available RAM before the
 	// slot math runs).
 	//
-	// Default 0.25 (25%). Set to 0 to use every byte the GPU and
+	// Default 0.15 (15%). Calibrated from the 16 GB-Mac dogfood point:
+	// the original 25% policy collapsed slots to Parallel=1 on a host
+	// running 7B+draft, which seralized agent fan-out unnecessarily.
+	// 15% still leaves multi-GB of OS headroom (~2.4 GB on 16 GB;
+	// ~9 GB on 64 GB) while letting tight hosts pick 3-7 slots and
+	// big hosts pick 20+. Set to 0 to use every byte the GPU and
 	// safety margin allow — appropriate for dedicated inference hosts
 	// where no user is sharing the machine. Values outside [0, 0.9]
 	// fall back to the default.
@@ -188,15 +193,47 @@ func New(cfg Config) (*Server, error) {
 		// Policy: user-OS comfort budget.
 		userReserve := cfg.UserReserveRatio
 		if userReserve <= 0 || userReserve > 0.9 {
-			userReserve = 0.25
+			userReserve = 0.15
 		}
 		available -= int64(float64(AvailableMemory()) * userReserve)
 
-		// Platform constant: GPU compute-buffer reserve.
-		if runtime.GOOS == "darwin" {
-			const gpuComputeReserveBytes = int64(3) * 1024 * 1024 * 1024
-			available -= gpuComputeReserveBytes
-		}
+		// GPU compute-buffer reserve: derived from model architecture.
+		// llama.cpp's forward pass needs working memory for layer
+		// activations and attention scores (separate from the KV cache
+		// counted per-slot). The dominant terms are well-defined from
+		// GGUF metadata:
+		//
+		//   intermediates = layers × embeddingDim × maxBatch × bytesPerCompute
+		//   attention     = headCount × maxBatch² × bytesPerCompute
+		//   total reserve = intermediates + attention + workingSlack
+		//
+		// maxBatch is llama.cpp's --n-batch (default 2048). bytesPerCompute
+		// is 4 for f32 (the safe assumption; bf16/f16 compute paths halve
+		// the figure but llama.cpp falls back to f32 internally for many
+		// operations). workingSlack covers small allocations the formula
+		// doesn't enumerate (sampler buffers, logit storage, etc.) —
+		// kept modest so the reserve stays defensible.
+		//
+		// Worked example for qwen2.5-7B (28 layers, 3584 dim, 28 heads):
+		//   intermediates = 28 × 3584 × 2048 × 4 ≈ 820 MB
+		//   attention     = 28 × 2048 × 2048 × 4 ≈ 470 MB
+		//   slack         = 500 MB
+		//   reserve ≈ 1.8 GB (vs the previous 3 GB platform constant)
+		//
+		// For qwen2.5-32B (64 layers, 5120 dim, 40 heads):
+		//   intermediates ≈ 2.7 GB
+		//   attention     ≈ 670 MB
+		//   reserve       ≈ 3.9 GB
+		//
+		// The formula scales naturally to any GGUF that exposes the
+		// standard architecture metadata fields.
+		const maxBatch = 2048
+		const bytesPerCompute = 4
+		const workingSlack = int64(500) * 1024 * 1024
+		gpuComputeReserve := int64(meta.Layers)*int64(meta.EmbeddingDim)*maxBatch*bytesPerCompute +
+			int64(meta.HeadCount)*maxBatch*maxBatch*bytesPerCompute +
+			workingSlack
+		available -= gpuComputeReserve
 
 		if available <= 0 {
 			cfg.Parallel = 1
