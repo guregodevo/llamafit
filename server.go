@@ -52,6 +52,24 @@ type Config struct {
 	// scheduling.
 	Embeddings bool
 	Logger     *slog.Logger
+
+	// UserReserveRatio is the fraction of available host RAM held back
+	// from the auto-Parallel fit so the operator's OS, terminal,
+	// editor, browser, and any other apps don't get pushed into swap
+	// when llama-server runs at peak slot occupancy.
+	//
+	// Distinct from the GPU compute-buffer reserve below: that one
+	// protects the inference compute from OOM at the Metal layer;
+	// this one protects the human's interactive experience at the
+	// OS layer. They're separate constraints in the slot-fit
+	// optimization (both subtracted from available RAM before the
+	// slot math runs).
+	//
+	// Default 0.25 (25%). Set to 0 to use every byte the GPU and
+	// safety margin allow — appropriate for dedicated inference hosts
+	// where no user is sharing the machine. Values outside [0, 0.9]
+	// fall back to the default.
+	UserReserveRatio float64
 }
 
 // autoGPULayers picks a default offload count for the host when the
@@ -120,33 +138,66 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("read model metadata: %w", err)
 	}
 
-	// Auto-calculate parallel slots from model metadata + available RAM,
-	// adjusted for two things OptimalSlots doesn't see on its own:
+	// Auto-Parallel: posed as an optimization problem rather than a
+	// stack of heuristics.
 	//
-	//  1. The draft model's footprint. When speculative decoding is on
-	//     (Config.DraftModelPath set), the draft GGUF loads into the
-	//     same process and competes for RAM. OptimalSlots only models
-	//     the main model's slot-KV cost; we subtract the draft file
-	//     size from available before the slot math.
+	//   maximize  slots
+	//   subject to
+	//     modelBytes
+	//   + draftBytes
+	//   + slots × kvPerSlot(ctxSize, kvCacheType)
+	//   + gpuComputeReserve
+	//   ≤ availableRAM × (1 − userReserveRatio)
 	//
-	//  2. macOS Metal command-buffer reserve. Metal's per-process budget
-	//     is tighter than the 10% safety margin OptimalSlots applies to
-	//     total RAM. Empirical: a 16 GB Mac running 7B-Q4 + 1.5B draft
-	//     OOM'd at Parallel=5 with "kIOGPUCommandBufferCallbackErrorOutOfMemory"
-	//     even though OptimalSlots said the RAM was there. A 3 GB
-	//     darwin-only reserve closes the gap. Linux uses CUDA / no GPU
-	//     in our tested deployments and doesn't need the margin.
+	// Two reserve terms, each protecting a different invariant:
+	//
+	//   - userReserveRatio (policy, default 0.25): the operator-OS
+	//     comfort budget. 25% of available RAM is held back from
+	//     llama-server so the user's editor / browser / terminal
+	//     don't get pushed into swap when slots fill.
+	//
+	//   - gpuComputeReserve (platform constant): the GPU's compute-
+	//     buffer headroom. macOS Metal's per-process budget is tighter
+	//     than the userReserve alone protects against — a 16 GB Mac
+	//     running 7B-Q4 + 1.5B draft OOM'd with
+	//     "kIOGPUCommandBufferCallbackErrorOutOfMemory" even though
+	//     RAM math said there was headroom. 3 GB darwin-only closes
+	//     the gap. Linux deployments (CUDA / CPU) haven't shown the
+	//     same gap and stay on 0.
+	//
+	// Solving for slots gives the closed-form
+	//   slots = ⌊(availableRAM × (1 − userReserveRatio) − modelBytes
+	//             − draftBytes − gpuComputeReserve) / kvPerSlot⌋
+	// which OptimalSlots computes once we adjust the availableBytes
+	// input. No iteration, no heuristic threshold — single linear
+	// optimization with named, auditable constraints.
+	//
+	// Draft model footprint is subtracted directly (the GGUF file
+	// size) because the draft loads into the same llama-server process
+	// alongside the main model; OptimalSlots only models the main
+	// model's slot-KV cost.
 	if cfg.Parallel <= 0 {
 		available := AvailableMemory()
+
 		if cfg.DraftModelPath != "" {
 			if info, err := os.Stat(cfg.DraftModelPath); err == nil {
 				available -= info.Size()
 			}
 		}
-		if runtime.GOOS == "darwin" {
-			const metalReserveBytes = int64(3) * 1024 * 1024 * 1024
-			available -= metalReserveBytes
+
+		// Policy: user-OS comfort budget.
+		userReserve := cfg.UserReserveRatio
+		if userReserve <= 0 || userReserve > 0.9 {
+			userReserve = 0.25
 		}
+		available -= int64(float64(AvailableMemory()) * userReserve)
+
+		// Platform constant: GPU compute-buffer reserve.
+		if runtime.GOOS == "darwin" {
+			const gpuComputeReserveBytes = int64(3) * 1024 * 1024 * 1024
+			available -= gpuComputeReserveBytes
+		}
+
 		if available <= 0 {
 			cfg.Parallel = 1
 		} else {
