@@ -53,6 +53,19 @@ type Config struct {
 	Embeddings bool
 	Logger     *slog.Logger
 
+	// CalibrationPath is where to read/write the on-disk cache of
+	// past auto-Parallel choices. When set and a matching entry
+	// exists for the current (model, host, ctx, kv_type, draft)
+	// tuple, server.New uses the cached Parallel instead of running
+	// the formula — Tangram-style profile-then-persist. When unset,
+	// or no matching entry, the formula runs as before and the
+	// result is persisted after successful startup (Runner side).
+	//
+	// Empty string disables the calibration cache entirely
+	// (formula every boot). The CLI uses DefaultCalibrationPath()
+	// at ~/.aktapus/llm/calibration.json.
+	CalibrationPath string
+
 	// UserReserveRatio is the fraction of available host RAM held back
 	// from the auto-Parallel fit so the operator's OS, terminal,
 	// editor, browser, and any other apps don't get pushed into swap
@@ -143,8 +156,27 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("read model metadata: %w", err)
 	}
 
-	// Auto-Parallel: posed as an optimization problem rather than a
-	// stack of heuristics.
+	// Auto-Parallel: profile-then-persist (Tangram-style). When a
+	// calibration entry exists for this (model, host, config) tuple,
+	// reuse the persisted Parallel choice — first-boot ran the
+	// formula, observed the result was stable, and persisted it.
+	// Subsequent boots skip the formula entirely.
+	if cfg.Parallel <= 0 && cfg.CalibrationPath != "" {
+		if cal, cerr := LoadCalibration(cfg.CalibrationPath); cerr == nil {
+			if key, kerr := buildCalibrationKey(cfg); kerr == nil {
+				if hit := cal.Find(key); hit != nil && hit.Parallel > 0 {
+					cfg.Parallel = hit.Parallel
+					cfg.Logger.Info("calibration hit",
+						slog.Int("parallel", hit.Parallel),
+						slog.Int("boots_known_good", hit.BootsKnownGood),
+						slog.Time("last_boot_at", hit.LastBootAt))
+				}
+			}
+		}
+	}
+
+	// Formula fallback: posed as an optimization problem rather than
+	// a stack of heuristics.
 	//
 	//   maximize  slots
 	//   subject to

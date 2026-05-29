@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -120,6 +121,34 @@ func (r *Runner) EnsureRunning(ctx context.Context, cfg Config) (string, error) 
 		cfg:       cfg,
 		startedAt: time.Now(),
 	}
+
+	// Persist the (now-proven-stable) Parallel choice into the
+	// calibration cache so the next boot with the same (model, host,
+	// config) tuple skips the formula and reuses this value. The
+	// readiness check above is the success signal — llama-server
+	// finished loading the model and reported /health without
+	// crashing on KV allocation or Metal command buffer.
+	//
+	// Persistence failures are non-fatal: we already have a running
+	// server, the cache is a perf optimization, not a correctness
+	// constraint. Log and continue.
+	if cfg.CalibrationPath != "" && srv.cfg.Parallel > 0 {
+		if cal, err := LoadCalibration(cfg.CalibrationPath); err == nil {
+			if key, kerr := buildCalibrationKey(cfg); kerr == nil {
+				key.Parallel = srv.cfg.Parallel
+				key.LastBootAt = time.Now().UTC()
+				cal.Upsert(key)
+				if serr := SaveCalibration(cfg.CalibrationPath, cal); serr != nil {
+					cfg.Logger.Warn("calibration save failed",
+						slog.String("err", serr.Error()))
+				} else {
+					cfg.Logger.Info("calibration saved",
+						slog.Int("parallel", srv.cfg.Parallel))
+				}
+			}
+		}
+	}
+
 	return baseURL, nil
 }
 
