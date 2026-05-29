@@ -120,10 +120,38 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("read model metadata: %w", err)
 	}
 
-	// Auto-calculate parallel slots from model metadata + available RAM
+	// Auto-calculate parallel slots from model metadata + available RAM,
+	// adjusted for two things OptimalSlots doesn't see on its own:
+	//
+	//  1. The draft model's footprint. When speculative decoding is on
+	//     (Config.DraftModelPath set), the draft GGUF loads into the
+	//     same process and competes for RAM. OptimalSlots only models
+	//     the main model's slot-KV cost; we subtract the draft file
+	//     size from available before the slot math.
+	//
+	//  2. macOS Metal command-buffer reserve. Metal's per-process budget
+	//     is tighter than the 10% safety margin OptimalSlots applies to
+	//     total RAM. Empirical: a 16 GB Mac running 7B-Q4 + 1.5B draft
+	//     OOM'd at Parallel=5 with "kIOGPUCommandBufferCallbackErrorOutOfMemory"
+	//     even though OptimalSlots said the RAM was there. A 3 GB
+	//     darwin-only reserve closes the gap. Linux uses CUDA / no GPU
+	//     in our tested deployments and doesn't need the margin.
 	if cfg.Parallel <= 0 {
 		available := AvailableMemory()
-		cfg.Parallel = meta.OptimalSlots(cfg.CtxSize, available, cfg.KVCacheType)
+		if cfg.DraftModelPath != "" {
+			if info, err := os.Stat(cfg.DraftModelPath); err == nil {
+				available -= info.Size()
+			}
+		}
+		if runtime.GOOS == "darwin" {
+			const metalReserveBytes = int64(3) * 1024 * 1024 * 1024
+			available -= metalReserveBytes
+		}
+		if available <= 0 {
+			cfg.Parallel = 1
+		} else {
+			cfg.Parallel = meta.OptimalSlots(cfg.CtxSize, available, cfg.KVCacheType)
+		}
 	}
 
 	return &Server{
