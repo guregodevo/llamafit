@@ -235,42 +235,51 @@ func New(cfg Config) (*Server, error) {
 		}
 		available -= int64(float64(AvailableMemory()) * userReserve)
 
-		// GPU compute-buffer reserve: derived from model architecture.
-		// llama.cpp's forward pass needs working memory for layer
-		// activations and attention scores (separate from the KV cache
-		// counted per-slot). The dominant terms are well-defined from
-		// GGUF metadata:
+		// GPU compute-buffer reserve. Held back from the slot math to
+		// cover llama.cpp's forward-pass working memory (intermediates,
+		// attention scratch, sampler buffers, etc.) that aren't counted
+		// in the per-slot KV cost.
 		//
-		//   intermediates = layers × embeddingDim × maxBatch × bytesPerCompute
-		//   attention     = headCount × maxBatch² × bytesPerCompute
-		//   total reserve = intermediates + attention + workingSlack
+		// Two-term formula:
 		//
-		// maxBatch is llama.cpp's --n-batch (default 2048). bytesPerCompute
-		// is 4 for f32 (the safe assumption; bf16/f16 compute paths halve
-		// the figure but llama.cpp falls back to f32 internally for many
-		// operations). workingSlack covers small allocations the formula
-		// doesn't enumerate (sampler buffers, logit storage, etc.) —
-		// kept modest so the reserve stays defensible.
+		//   archDerived = layers × embeddingDim × maxBatch × bytesPerCompute
+		//                 + headCount × maxBatch² × bytesPerCompute
+		//   reserve     = max(archDerived × 1.7, platformFloor)
 		//
-		// Worked example for qwen2.5-7B (28 layers, 3584 dim, 28 heads):
-		//   intermediates = 28 × 3584 × 2048 × 4 ≈ 820 MB
-		//   attention     = 28 × 2048 × 2048 × 4 ≈ 470 MB
-		//   slack         = 500 MB
-		//   reserve ≈ 1.8 GB (vs the previous 3 GB platform constant)
+		// archDerived scales with model architecture; platformFloor is
+		// the empirically calibrated minimum that prevents the OOM /
+		// "Compute error" symptoms observed when the arch-derived value
+		// is too small for what llama.cpp actually allocates (flash
+		// attention scratch + sampler buffers + non-batch allocations
+		// the formula doesn't enumerate). Empirical receipt 2026-05-30:
+		// the pure-formula reserve gave Parallel=8 on a 16 GB Mac
+		// running 7B + 1.5B draft, model loaded fine and /health
+		// passed, but the first real inference returned HTTP 500
+		// "Compute error" from Metal command buffer pressure during
+		// the forward pass. Raising the floor (3 GB darwin) restores
+		// the working Parallel=4-5 the prior empirical const gave.
 		//
-		// For qwen2.5-32B (64 layers, 5120 dim, 40 heads):
-		//   intermediates ≈ 2.7 GB
-		//   attention     ≈ 670 MB
-		//   reserve       ≈ 3.9 GB
-		//
-		// The formula scales naturally to any GGUF that exposes the
-		// standard architecture metadata fields.
+		// The 1.7x multiplier on archDerived absorbs llama.cpp's
+		// uncounted allocations (sampler chain, logit slab, draft
+		// model's own compute scratch when spec decoding is on, etc.)
+		// — chosen so 7B with full speculative decoding lands inside
+		// platformFloor (the safe operating point) while 32B+ comes
+		// in above floor and the arch-derived value dominates.
 		const maxBatch = 2048
 		const bytesPerCompute = 4
-		const workingSlack = int64(500) * 1024 * 1024
-		gpuComputeReserve := int64(meta.Layers)*int64(meta.EmbeddingDim)*maxBatch*bytesPerCompute +
-			int64(meta.HeadCount)*maxBatch*maxBatch*bytesPerCompute +
-			workingSlack
+		const archMultiplier = 1.7
+		archDerived := int64(meta.Layers)*int64(meta.EmbeddingDim)*maxBatch*bytesPerCompute +
+			int64(meta.HeadCount)*maxBatch*maxBatch*bytesPerCompute
+		gpuComputeReserve := int64(float64(archDerived) * archMultiplier)
+
+		// Platform floor — pure formula above undersized for 7B-class
+		// models on macOS Metal under speculative decoding load.
+		if runtime.GOOS == "darwin" {
+			const darwinMetalFloor = int64(3) * 1024 * 1024 * 1024
+			if gpuComputeReserve < darwinMetalFloor {
+				gpuComputeReserve = darwinMetalFloor
+			}
+		}
 		available -= gpuComputeReserve
 
 		if available <= 0 {
