@@ -166,7 +166,13 @@ func New(cfg Config) (*Server, error) {
 			if key, kerr := buildCalibrationKey(cfg); kerr == nil {
 				if hit := cal.Find(key); hit != nil && hit.Parallel > 0 {
 					cfg.Parallel = hit.Parallel
-					cfg.Logger.Info("calibration hit",
+					// Use slog.Default() rather than cfg.Logger here —
+					// the Config.defaults() call in New() that
+					// initializes cfg.Logger hasn't run yet at this
+					// point in EnsureRunning's hot path, so cfg.Logger
+					// can be nil. Default keeps logs flowing without
+					// requiring callers to set Logger explicitly.
+					slog.Info("llamafit calibration hit",
 						slog.Int("parallel", hit.Parallel),
 						slog.Int("boots_known_good", hit.BootsKnownGood),
 						slog.Time("last_boot_at", hit.LastBootAt))

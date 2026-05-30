@@ -138,11 +138,19 @@ func (r *Runner) EnsureRunning(ctx context.Context, cfg Config) (string, error) 
 				key.Parallel = srv.cfg.Parallel
 				key.LastBootAt = time.Now().UTC()
 				cal.Upsert(key)
+				// Use slog.Default() — cfg.Logger here is the
+				// pre-defaults() Config that EnsureRunning received
+				// from the caller; aktapus doesn't set Logger so
+				// dereferencing cfg.Logger panics. The server's own
+				// logging uses srv.log which IS post-defaults() and
+				// safe to use, but we want the calibration log on the
+				// callers' default logger anyway since it's a wrapper
+				// concern, not a server-component one.
 				if serr := SaveCalibration(cfg.CalibrationPath, cal); serr != nil {
-					cfg.Logger.Warn("calibration save failed",
+					slog.Warn("llamafit calibration save failed",
 						slog.String("err", serr.Error()))
 				} else {
-					cfg.Logger.Info("calibration saved",
+					slog.Info("llamafit calibration saved",
 						slog.Int("parallel", srv.cfg.Parallel))
 				}
 			}
