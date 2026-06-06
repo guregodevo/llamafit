@@ -7,6 +7,8 @@ import (
 	"math"
 	"os"
 	"runtime"
+
+	"github.com/shirou/gopsutil/v4/mem"
 )
 
 // GGUFMetadata holds model parameters extracted from a GGUF file.
@@ -161,31 +163,55 @@ func (e MemoryEstimate) TotalBytes(slots int) int64 {
 	return e.ModelBytes + int64(slots)*e.KVPerSlotBytes + e.OverheadBytes
 }
 
-// AvailableMemory returns estimated available memory for model serving.
-// Reserves ~4GB for OS on macOS, ~2GB on Linux.
+// systemMemory reports installed and reclaimable RAM in bytes via
+// gopsutil, which reads the OS the right way on every platform (Linux
+// /proc/meminfo, darwin sysctl, Windows GlobalMemoryStatusEx) so we
+// don't hand-roll and maintain a probe per GOOS. total is MemTotal;
+// available is MemAvailable — free plus reclaimable cache, i.e. what the
+// kernel says a new process can actually use without swapping. Both are 0
+// only when the OS probe fails, in which case callers fall back.
+func systemMemory() (total, available uint64) {
+	vm, err := mem.VirtualMemory()
+	if err != nil || vm.Total == 0 {
+		return 0, 0
+	}
+	return vm.Total, vm.Available
+}
+
+// AvailableMemory returns the RAM budget (bytes) llamafit may dedicate to
+// model serving. It starts from installed RAM minus a platform OS reserve
+// (macOS holds back more — Metal/unified memory shares this pool), then
+// clamps to what the OS reports as actually reclaimable right now, so a
+// busy host provisions fewer slots instead of over-committing the KV
+// cache. Prior to gopsutil this hardcoded 16 GB on every non-darwin host,
+// so a small Linux VPS thought it had 14 GB free and llama-server aborted
+// allocating an oversized KV cache on boot.
 func AvailableMemory() int64 {
-	var total uint64
-
-	// Use runtime.GOMAXPROCS as a proxy — actual memory detection below
-	switch runtime.GOOS {
-	case "darwin":
-		// macOS: read hw.memsize
-		total = detectTotalMemory()
-	default:
-		// Fallback: assume 16GB
-		total = 16 * 1024 * 1024 * 1024
+	total, available := systemMemory()
+	if total == 0 {
+		total = 16 * 1024 * 1024 * 1024 // last-resort fallback: assume 16GB
 	}
 
-	// Reserve memory for OS
-	reserved := uint64(4 * 1024 * 1024 * 1024) // 4GB for macOS
-	if runtime.GOOS == "linux" {
-		reserved = 2 * 1024 * 1024 * 1024 // 2GB for Linux
+	// Reserve memory for the OS (and, on darwin, the Metal/unified-memory
+	// budget the model also draws from).
+	reserved := uint64(2 * 1024 * 1024 * 1024) // 2GB default
+	if runtime.GOOS == "darwin" {
+		reserved = 4 * 1024 * 1024 * 1024 // 4GB for macOS
 	}
 
-	if total <= reserved {
-		return int64(total / 2)
+	var budget uint64
+	if total > reserved {
+		budget = total - reserved
+	} else {
+		budget = total / 2
 	}
-	return int64(total - reserved)
+
+	// Never claim more than the kernel says is currently available — this
+	// is what keeps us off the OOM killer when other processes hold RAM.
+	if available > 0 && available < budget {
+		budget = available
+	}
+	return int64(budget)
 }
 
 // ReadGGUFMetadata reads model parameters from a GGUF file header.

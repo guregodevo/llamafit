@@ -512,11 +512,12 @@ func FindFreePort() (int, error) {
 
 // SystemInfo returns information about the current system for capacity planning.
 func SystemInfo() map[string]interface{} {
+	total, _ := systemMemory()
 	return map[string]interface{}{
 		"os":               runtime.GOOS,
 		"arch":             runtime.GOARCH,
 		"cpus":             runtime.NumCPU(),
-		"total_memory":     formatBytes(int64(detectTotalMemory())),
+		"total_memory":     formatBytes(int64(total)),
 		"available_memory": formatBytes(AvailableMemory()),
 	}
 }

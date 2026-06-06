@@ -192,9 +192,10 @@ func buildCalibrationKey(cfg Config) (CalibrationEntry, error) {
 	if err != nil {
 		return CalibrationEntry{}, err
 	}
+	total, _ := systemMemory()
 	key := CalibrationEntry{
 		ModelID:      modelID,
-		HostRAMBytes: int64(detectTotalMemory()),
+		HostRAMBytes: int64(total),
 		OS:           runtime.GOOS,
 		Arch:         runtime.GOARCH,
 		CtxSize:      cfg.CtxSize,
