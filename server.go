@@ -23,6 +23,15 @@ type Config struct {
 	GPULayers   int    // Layers offloaded to GPU (0 = pick a sensible default via autoGPULayers; 99 = all; pass an explicit non-zero count to override)
 	KVCacheType string // KV cache quantization type: f16, q8_0, q4_0 (default: q8_0)
 	BinaryPath  string // Path to llama-server binary (default: auto-detect)
+	// ReasoningFormat controls how llama-server handles a model's reasoning /
+	// "thinking" output (chat mode only). Empty/"none" (default) leaves thought
+	// content inline in the message — fine for non-reasoning models (Qwen2.5),
+	// but for a thinking-first model (e.g. Gemma's channel format) the raw
+	// control tokens then leak into the answer. "auto" makes llama-server
+	// EXTRACT reasoning into a separate reasoning_content field, leaving
+	// `content` as the clean final answer. Safe no-op for models that emit no
+	// reasoning, so callers can pass "auto" unconditionally.
+	ReasoningFormat string
 	// DraftModelPath enables speculative decoding when set. The draft
 	// model proposes tokens that the main model verifies in batch — for
 	// sequential decoding workloads on the same GPU, this typically
@@ -381,9 +390,16 @@ func (s *Server) buildArgs() []string {
 		// endpoints aren't served.
 		args = append(args, "--embeddings", "--pooling", "mean")
 	} else {
-		// Chat mode: kill the model's <think> tags from output so
-		// downstream OAI clients don't have to strip them.
-		args = append(args, "--reasoning-format", "none", "--reasoning", "off")
+		// Chat mode reasoning handling. Default ("none") strips/leaves no
+		// think tags — correct for non-reasoning models and what every prior
+		// caller got. "auto" instead EXTRACTS reasoning into reasoning_content
+		// so a thinking-first model's control tokens (e.g. Gemma's channel
+		// format) don't leak into `content`.
+		if rf := s.cfg.ReasoningFormat; rf != "" && rf != "none" {
+			args = append(args, "--reasoning-format", rf)
+		} else {
+			args = append(args, "--reasoning-format", "none", "--reasoning", "off")
+		}
 		// --cache-reuse N enables cross-slot prefix sharing: when a
 		// request lands on a slot whose KV cache holds a different
 		// suffix, llama-server can still reuse already-computed
