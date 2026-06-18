@@ -24,13 +24,16 @@ type Config struct {
 	KVCacheType string // KV cache quantization type: f16, q8_0, q4_0 (default: q8_0)
 	BinaryPath  string // Path to llama-server binary (default: auto-detect)
 	// ReasoningFormat controls how llama-server handles a model's reasoning /
-	// "thinking" output (chat mode only). Empty/"none" (default) leaves thought
-	// content inline in the message — fine for non-reasoning models (Qwen2.5),
-	// but for a thinking-first model (e.g. Gemma's channel format) the raw
-	// control tokens then leak into the answer. "auto" makes llama-server
-	// EXTRACT reasoning into a separate reasoning_content field, leaving
-	// `content` as the clean final answer. Safe no-op for models that emit no
-	// reasoning, so callers can pass "auto" unconditionally.
+	// "thinking" output (chat mode only). "auto" makes llama-server EXTRACT
+	// reasoning into a separate reasoning_content field, leaving `content` as
+	// the clean final answer; "none" leaves thought content inline.
+	//
+	// Empty (the default) resolves to "auto", which is model-agnostic:
+	// llama-server detects the reasoning format from the model's own chat
+	// template, so a thinking model's <think>/channel tokens are extracted
+	// while a non-reasoning model is left untouched (verified no-op on
+	// Qwen2.5). No per-model configuration needed. Set "none" to force the
+	// raw output inline, or pass a specific format ("deepseek", etc.) through.
 	ReasoningFormat string
 	// DraftModelPath enables speculative decoding when set. The draft
 	// model proposes tokens that the main model verifies in batch — for
@@ -390,12 +393,17 @@ func (s *Server) buildArgs() []string {
 		// endpoints aren't served.
 		args = append(args, "--embeddings", "--pooling", "mean")
 	} else {
-		// Chat mode reasoning handling. Default ("none") strips/leaves no
-		// think tags — correct for non-reasoning models and what every prior
-		// caller got. "auto" instead EXTRACTS reasoning into reasoning_content
-		// so a thinking-first model's control tokens (e.g. Gemma's channel
-		// format) don't leak into `content`.
-		if rf := s.cfg.ReasoningFormat; rf != "" && rf != "none" {
+		// Chat mode reasoning handling. Default ("") is "auto": llama-server
+		// detects a model's reasoning format from its own chat template and
+		// extracts the thinking into reasoning_content, keeping `content`
+		// clean. This is data-driven per model — no hardcoded arch list — and
+		// a safe no-op for non-reasoning models (nothing to extract). An
+		// explicit "none" forces the raw output inline.
+		rf := s.cfg.ReasoningFormat
+		if rf == "" {
+			rf = "auto"
+		}
+		if rf != "none" {
 			args = append(args, "--reasoning-format", rf)
 		} else {
 			args = append(args, "--reasoning-format", "none", "--reasoning", "off")

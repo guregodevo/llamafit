@@ -88,7 +88,9 @@ func TestBuildArgs_EmbeddingMode(t *testing.T) {
 }
 
 // TestBuildArgs_ChatMode confirms the inverse: chat mode emits
-// --reasoning* and does NOT emit --embeddings.
+// --reasoning-format and does NOT emit --embeddings. The default format is
+// "auto" (data-driven reasoning extraction), so the inline "--reasoning off"
+// pair is absent.
 func TestBuildArgs_ChatMode(t *testing.T) {
 	s := &Server{cfg: Config{
 		ModelPath:   "/models/qwen-7b.gguf",
@@ -104,8 +106,57 @@ func TestBuildArgs_ChatMode(t *testing.T) {
 	if slices.Contains(args, "--embeddings") {
 		t.Errorf("--embeddings leaked into chat-mode args: %v", args)
 	}
-	if !slices.Contains(args, "--reasoning-format") || !slices.Contains(args, "--reasoning") {
-		t.Errorf("--reasoning* flags missing from chat-mode args: %v", args)
+	idx := slices.Index(args, "--reasoning-format")
+	if idx < 0 || idx+1 >= len(args) {
+		t.Fatalf("--reasoning-format missing from chat-mode args: %v", args)
+	}
+	if args[idx+1] != "auto" {
+		t.Errorf("default --reasoning-format = %q, want %q (args=%v)", args[idx+1], "auto", args)
+	}
+}
+
+// TestBuildArgs_ReasoningDefault covers the model-agnostic ReasoningFormat
+// resolution: empty defaults to "auto" (llama-server detects the format from
+// the model's chat template — no hardcoded arch list), an explicit "none"
+// forces inline output, and any other explicit value passes through.
+func TestBuildArgs_ReasoningDefault(t *testing.T) {
+	cases := []struct {
+		name         string
+		explicit     string // caller-set ReasoningFormat ("" = unset)
+		wantFormat   string // expected --reasoning-format value
+		wantInlineUp bool   // expect the "--reasoning off" inline pair
+	}{
+		{"default empty -> auto", "", "auto", false},
+		{"explicit none -> inline", "none", "none", true},
+		{"explicit auto", "auto", "auto", false},
+		{"explicit passthrough", "deepseek", "deepseek", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Server{cfg: Config{
+				ModelPath:       "/models/m.gguf",
+				Host:            "127.0.0.1",
+				Port:            8081,
+				CtxSize:         4096,
+				Parallel:        1,
+				GPULayers:       99,
+				KVCacheType:     "q8_0",
+				ReasoningFormat: tc.explicit,
+			}}
+			args := s.buildArgs()
+
+			idx := slices.Index(args, "--reasoning-format")
+			if idx < 0 || idx+1 >= len(args) {
+				t.Fatalf("--reasoning-format missing: %v", args)
+			}
+			if args[idx+1] != tc.wantFormat {
+				t.Errorf("--reasoning-format = %q, want %q (args=%v)", args[idx+1], tc.wantFormat, args)
+			}
+			gotInline := slices.Contains(args, "--reasoning")
+			if gotInline != tc.wantInlineUp {
+				t.Errorf("--reasoning (inline off) present = %v, want %v (args=%v)", gotInline, tc.wantInlineUp, args)
+			}
+		})
 	}
 }
 

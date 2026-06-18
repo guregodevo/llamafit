@@ -133,8 +133,9 @@ func TestKVCachePerSlot_NoSWA(t *testing.T) {
 			},
 			ctxSize:   4096,
 			cacheType: "q8_0",
-			// 32 * 2 * 4096 * 8 * 128 * 1.0 = 268,435,456
-			want: 268_435_456,
+			// 32 * 2 * 4096 * 8 * 128 * 1.0625 = 285,212,672
+			// (q8_0 = 34 bytes per 32-elem block incl. the f16 scale)
+			want: 285_212_672,
 		},
 		{
 			name: "llama-f16",
@@ -185,10 +186,10 @@ func TestKVCachePerSlot_WithSWA(t *testing.T) {
 		SWALayerCount:  35, // raw from pattern (35 true entries)
 	}
 
-	// Non-SWA: 4 layers * 2(K+V) * 16384 ctx * 2 kv_heads * 512 dim * 1.0(q8_0) = 134,217,728
+	// Non-SWA: 4 layers * 2(K+V) * 16384 ctx * 2 kv_heads * 512 dim * 1.0625(q8_0) = 142,606,336
 	// SWA:    20 layers * 2(K+V) * 1024 swa_ctx * 2 kv_heads * 256 dim * 2.0(f16) = 41,943,040
-	// Total: 176,160,768
-	want := int64(134_217_728 + 41_943_040)
+	// Total: 184,549,376
+	want := int64(142_606_336 + 41_943_040)
 
 	got := meta.kvCachePerSlot(16384, "q8_0")
 	if got != want {
@@ -203,6 +204,78 @@ func TestKVCachePerSlot_WithSWA(t *testing.T) {
 
 	if pctError > 10 {
 		t.Errorf("SWA estimate off by %.1f%%", pctError)
+	}
+}
+
+// TestKVCachePerSlot_PerLayer pins the exact per-layer accounting against
+// real gemma-4-12B-it numbers verified against llama-server's own KV buffer
+// report. The architecture is hybrid: a repeating 5:1 pattern of
+// sliding-window layers (8 KV heads, 256 head-dim, windowed) and
+// full-attention layers (1 KV head, 512 head-dim, full context). A single
+// scalar KVHeadCount can't express this — the full layers have 1 KV head,
+// not 8 — so the per-layer arrays drive the estimate.
+func TestKVCachePerSlot_PerLayer(t *testing.T) {
+	// 48 layers, pattern [SWA×5, full×1] repeating; head_count_kv mirrors it
+	// (8 for SWA layers, 1 for the full-attention layers).
+	headKV := make([]int, 48)
+	pattern := make([]bool, 48)
+	for i := 0; i < 48; i++ {
+		full := (i+1)%6 == 0 // every 6th layer is full-attention
+		if full {
+			headKV[i] = 1
+			pattern[i] = false
+		} else {
+			headKV[i] = 8
+			pattern[i] = true
+		}
+	}
+
+	meta := GGUFMetadata{
+		Layers:              48,
+		EmbeddingDim:        3840,
+		HeadCount:           16,
+		KVHeadCount:         8, // element[0]; only used by the scalar fallback
+		SlidingWindow:       1024,
+		KeyLength:           512,
+		KeyLengthSWA:        256,
+		SWALayerCount:       40,
+		HeadCountKVPerLayer: headKV,
+		SWAPattern:          pattern,
+	}
+
+	// Full (8 layers): 8 * 16384 cells * 2(K+V) * 1 head * 512 dim * 1.0625 = 142,606,336 (136 MiB)
+	// SWA (40 layers): 40 * 1536 cells * 2(K+V) * 8 heads * 256 dim * 2.0(f16) = 503,316,480 (480 MiB)
+	// Total: 645,922,816 bytes = 616 MiB — matches llama-server exactly.
+	want := int64(142_606_336 + 503_316_480)
+	got := meta.kvCachePerSlot(16384, "q8_0")
+	if got != want {
+		t.Errorf("per-layer kvCachePerSlot = %d (%.0f MiB), want %d (%.0f MiB)",
+			got, float64(got)/(1024*1024), want, float64(want)/(1024*1024))
+	}
+}
+
+// TestKVCachePerSlot_LinearHybrid pins the linear-attention hybrid path
+// against real qwen3.5-9B numbers verified against llama-server. With 32
+// layers and full_attention_interval=4, only 8 layers keep a KV cache; the
+// other 24 use linear attention and contribute no context-scaling state.
+func TestKVCachePerSlot_LinearHybrid(t *testing.T) {
+	meta := GGUFMetadata{
+		Layers:                32,
+		EmbeddingDim:          4096,
+		HeadCount:             16,
+		KVHeadCount:           4,
+		KeyLength:             256,
+		FullAttentionInterval: 4, // every 4th layer is full attention → 8 layers
+	}
+
+	// 8 full-attention layers * 2(K+V) * 16384 ctx * 4 kv_heads * 256 dim * 1.0625(q8_0)
+	//   = 285,212,672 bytes = 272 MiB — matches llama-server exactly.
+	// (Without the hybrid fix, all 32 layers counted → 1088 MiB, 4x too high.)
+	want := int64(285_212_672)
+	got := meta.kvCachePerSlot(16384, "q8_0")
+	if got != want {
+		t.Errorf("linear-hybrid kvCachePerSlot = %d (%.0f MiB), want %d (%.0f MiB)",
+			got, float64(got)/(1024*1024), want, float64(want)/(1024*1024))
 	}
 }
 
@@ -282,7 +355,7 @@ func TestOptimalSlots(t *testing.T) {
 			ctxSize:   16384,
 			available: 12 * 1024 * 1024 * 1024,
 			cacheType: "q8_0",
-			want:      6,
+			want:      5,
 		},
 		{
 			name:      "gemma4-16GB-q8_0",
@@ -290,7 +363,7 @@ func TestOptimalSlots(t *testing.T) {
 			ctxSize:   16384,
 			available: 12 * 1024 * 1024 * 1024,
 			cacheType: "q8_0",
-			want:      32,
+			want:      30,
 		},
 		{
 			name:      "gemma4-barely-fits",
@@ -398,8 +471,8 @@ func TestKVBytesPerElement(t *testing.T) {
 		cacheType string
 		want      float64
 	}{
-		{"q4_0", 0.5},
-		{"q8_0", 1.0},
+		{"q4_0", 0.5625}, // 18 bytes / 32-elem block (incl. f16 scale)
+		{"q8_0", 1.0625}, // 34 bytes / 32-elem block (incl. f16 scale)
 		{"f16", 2.0},
 		{"f32", 4.0},
 		{"", 2.0},
