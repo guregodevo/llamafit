@@ -29,14 +29,15 @@ func TestRunner_EmptyState(t *testing.T) {
 	r.Stop()
 }
 
-func TestRunner_EmptyModelPath(t *testing.T) {
+func TestRunner_EmptyModelSource(t *testing.T) {
 	r := NewRunner()
 	_, err := r.EnsureRunning(context.Background(), Config{})
 	if err == nil {
-		t.Fatal("EnsureRunning with empty ModelPath returned nil error")
+		t.Fatal("EnsureRunning with empty Config returned nil error")
 	}
-	if !strings.Contains(err.Error(), "ModelPath is empty") {
-		t.Errorf("error = %q, want it to mention empty ModelPath", err)
+	// A config with neither a local ModelPath nor an HFRepo is rejected.
+	if !strings.Contains(err.Error(), "ModelPath") || !strings.Contains(err.Error(), "HFRepo") {
+		t.Errorf("error = %q, want it to mention both ModelPath and HFRepo", err)
 	}
 }
 
@@ -76,5 +77,28 @@ func TestRunner_ConcurrentEnsureRunning_Serializes_OnError(t *testing.T) {
 	wg.Wait()
 	if r.Status().Running {
 		t.Errorf("Status().Running = true after all calls errored")
+	}
+}
+
+// TestSameModelSource covers swap detection across local paths and HF specs.
+func TestSameModelSource(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b Config
+		want bool
+	}{
+		{"same path", Config{ModelPath: "/m.gguf"}, Config{ModelPath: "/m.gguf"}, true},
+		{"diff path", Config{ModelPath: "/a.gguf"}, Config{ModelPath: "/b.gguf"}, false},
+		{"same hf repo", Config{HFRepo: "u/r:q4"}, Config{HFRepo: "u/r:q4"}, true},
+		{"diff hf repo", Config{HFRepo: "u/r:q4"}, Config{HFRepo: "u/r:q8"}, false},
+		{"hf vs path", Config{HFRepo: "u/r"}, Config{ModelPath: "/m.gguf"}, false},
+		{"diff draft repo", Config{HFRepo: "u/r", HFDraftRepo: "u/d1"}, Config{HFRepo: "u/r", HFDraftRepo: "u/d2"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sameModelSource(tc.a, tc.b); got != tc.want {
+				t.Errorf("sameModelSource = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

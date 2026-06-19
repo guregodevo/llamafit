@@ -72,14 +72,17 @@ func NewRunner() *Runner {
 //   - the GGUF can't be read or doesn't fit in available memory
 //   - the server fails /health within readinessTimeout (60s)
 func (r *Runner) EnsureRunning(ctx context.Context, cfg Config) (string, error) {
-	if cfg.ModelPath == "" {
-		return "", errors.New("llamafit: ModelPath is empty")
+	// A model source is required, but it can be a local path OR a Hugging Face
+	// repo spec — New resolves HFRepo to a local file. Checking only ModelPath
+	// here would reject every HFRepo-only config before New ever runs.
+	if cfg.ModelPath == "" && cfg.HFRepo == "" {
+		return "", errors.New("llamafit: ModelPath and HFRepo are both empty")
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.current != nil {
-		if r.current.cfg.ModelPath == cfg.ModelPath && r.current.cfg.DraftModelPath == cfg.DraftModelPath {
+		if sameModelSource(r.current.cfg, cfg) {
 			return r.current.baseURL, nil
 		}
 		// Model swap — stop the existing server before starting the
@@ -134,7 +137,11 @@ func (r *Runner) EnsureRunning(ctx context.Context, cfg Config) (string, error) 
 	// constraint. Log and continue.
 	if cfg.CalibrationPath != "" && srv.cfg.Parallel > 0 {
 		if cal, err := LoadCalibration(cfg.CalibrationPath); err == nil {
-			if key, kerr := buildCalibrationKey(cfg); kerr == nil {
+			// Build the key from srv.cfg, not the caller's cfg: New resolves
+			// HFRepo into ModelPath, and the calibration key is keyed on the
+			// model file. The caller's cfg still has ModelPath empty for an
+			// HFRepo config, which would skip calibration entirely.
+			if key, kerr := buildCalibrationKey(srv.cfg); kerr == nil {
 				key.Parallel = srv.cfg.Parallel
 				key.LastBootAt = time.Now().UTC()
 				cal.Upsert(key)
@@ -158,6 +165,17 @@ func (r *Runner) EnsureRunning(ctx context.Context, cfg Config) (string, error) 
 	}
 
 	return baseURL, nil
+}
+
+// sameModelSource reports whether two configs name the same main and draft
+// model. It compares both the local-path fields and the Hugging Face repo
+// fields, so an HFRepo-only config (ModelPath empty) is matched correctly and
+// a change of repo spec is recognized as a model swap rather than a no-op.
+func sameModelSource(a, b Config) bool {
+	return a.ModelPath == b.ModelPath &&
+		a.DraftModelPath == b.DraftModelPath &&
+		a.HFRepo == b.HFRepo &&
+		a.HFDraftRepo == b.HFDraftRepo
 }
 
 // Stop tears down the running server. Idempotent — safe to call
