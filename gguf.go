@@ -26,6 +26,38 @@ type GGUFMetadata struct {
 	KeyLength      int // head dim for non-SWA layers (0 = derive from EmbeddingDim/HeadCount)
 	KeyLengthSWA   int // head dim for SWA layers (0 = same as KeyLength)
 	SWALayerCount  int // number of SWA layers (computed from sliding_window_pattern)
+
+	// Per-layer arrays, when the GGUF provides them. Hybrid-attention
+	// models (gemma) vary the KV head count by layer — the full-attention
+	// layers carry far fewer KV heads than the sliding-window layers — so a
+	// single scalar KVHeadCount can't describe them. When these are set
+	// (len == Layers) kvCachePerSlot accounts each layer exactly; otherwise
+	// it falls back to the scalar approximation.
+	HeadCountKVPerLayer []int  // KV heads per layer (0 entry = shared/no own cache)
+	SWAPattern          []bool // true = layer uses sliding-window attention
+
+	// FullAttentionInterval > 0 marks a linear-attention hybrid (qwen3.5):
+	// only every Nth layer keeps a growing softmax-attention KV cache; the
+	// rest use linear attention whose recurrent state is fixed-size and
+	// doesn't scale with context, so it's negligible for slot sizing. 0
+	// means every layer is full attention (the standard transformer case).
+	FullAttentionInterval int
+}
+
+// fullAttentionLayers returns how many layers keep a context-scaling KV
+// cache. For a linear-attention hybrid that's every Nth layer; otherwise
+// all of them.
+func (m *GGUFMetadata) fullAttentionLayers() int {
+	if m.FullAttentionInterval <= 0 {
+		return m.Layers
+	}
+	count := 0
+	for i := 0; i < m.Layers; i++ {
+		if (i+1)%m.FullAttentionInterval == 0 {
+			count++
+		}
+	}
+	return count
 }
 
 // headDimNonSWA returns the K/V head dimension for non-SWA layers.
@@ -48,17 +80,44 @@ func (m *GGUFMetadata) headDimSWA() int {
 }
 
 // KVBytesPerElement returns the bytes per element for a KV cache type.
+//
+// The quantized GGML types are block formats, not pure bit-packing: each
+// block of 32 elements stores its quantized integers PLUS one FP16 scale
+// (the per-block "s" in symmetric/abs-max quantization). That scale is real
+// resident memory, so the true cost is above the naive bits/8:
+//
+//	q8_0: 32 int8 + f16 scale = 34 bytes / 32 elems = 1.0625
+//	q4_0: 16 bytes (32×4bit) + f16 scale = 18 bytes / 32 elems = 0.5625
+//
+// Omitting the scale undercounts KV cache by ~6% (q8_0) to ~11% (q4_0),
+// which lets OptimalSlots provision a slot too many on tight hosts. f16/f32
+// are unquantized and carry no per-block scale.
 func KVBytesPerElement(cacheType string) float64 {
 	switch cacheType {
 	case "q4_0":
-		return 0.5
+		return 18.0 / 32.0 // 0.5625
 	case "q8_0":
-		return 1.0
+		return 34.0 / 32.0 // 1.0625
 	case "f32":
 		return 4.0
 	default: // f16
 		return 2.0
 	}
+}
+
+// swaCells returns the number of KV cells a sliding-window layer needs:
+// the window plus one micro-batch of lookahead. llama.cpp sizes the iSWA
+// cache at n_swa + n_ubatch (default ubatch 512), so a 1024 window
+// allocates 1536 cells — not the 2x window (2048) an earlier heuristic
+// assumed. Capped at the full context, since a layer never needs more
+// cells than the context holds.
+func swaCells(ctxSize, window int) int {
+	const ubatchLookahead = 512 // tracks llama.cpp's default n_ubatch
+	cells := window + ubatchLookahead
+	if cells > ctxSize {
+		cells = ctxSize
+	}
+	return cells
 }
 
 // ModelMemory returns estimated memory usage for a given context size and KV cache type.
@@ -86,10 +145,45 @@ func (m *GGUFMetadata) kvCachePerSlot(ctxSize int, cacheType string) int64 {
 		return 0
 	}
 
-	// No sliding window — all layers use full context
+	// Exact per-layer accounting when the GGUF gives per-layer KV head
+	// counts. Hybrid-attention models (gemma) vary BOTH the attention span
+	// and the KV head count by layer: the sliding-window layers carry many
+	// KV heads but a small window, while the full-context layers carry far
+	// fewer KV heads (gemma4-12B: 8 vs 1). A single scalar KVHeadCount
+	// applied to every layer overcounts the full layers ~8x. Sum each layer
+	// at its own (heads, head_dim, span, dtype) instead.
+	if len(m.HeadCountKVPerLayer) == m.Layers && m.Layers > 0 {
+		var total int64
+		for i := 0; i < m.Layers; i++ {
+			kvHeads := m.HeadCountKVPerLayer[i]
+			if kvHeads <= 0 {
+				continue // shared-KV layer: no cache of its own
+			}
+			isSWA := m.SlidingWindow > 0 && i < len(m.SWAPattern) && m.SWAPattern[i]
+			var cells, headDim int64
+			var bytes float64
+			if isSWA {
+				cells = int64(swaCells(ctxSize, m.SlidingWindow))
+				headDim = int64(m.headDimSWA())
+				bytes = KVBytesPerElement("f16") // llama.cpp keeps SWA cache in f16
+			} else {
+				cells = int64(ctxSize)
+				headDim = int64(m.headDimNonSWA())
+				bytes = KVBytesPerElement(cacheType)
+			}
+			elements := cells * 2 * int64(kvHeads) * headDim // 2 = K + V
+			total += int64(float64(elements) * bytes)
+		}
+		return total
+	}
+
+	// No sliding window — full-attention layers use full context. For a
+	// linear-attention hybrid (FullAttentionInterval > 0) only every Nth
+	// layer carries a KV cache; the linear layers contribute no
+	// context-scaling state.
 	if m.SlidingWindow == 0 {
 		headDim := int64(m.headDimNonSWA())
-		elements := int64(m.Layers) * 2 * int64(ctxSize) * int64(m.KVHeadCount) * headDim
+		elements := int64(m.fullAttentionLayers()) * 2 * int64(ctxSize) * int64(m.KVHeadCount) * headDim
 		return int64(float64(elements) * KVBytesPerElement(cacheType))
 	}
 
@@ -264,8 +358,8 @@ func ReadGGUFMetadata(path string) (*GGUFMetadata, error) {
 				meta.Architecture = s
 			}
 		case "general.file_type":
-			if v, ok := val.(uint32); ok {
-				meta.FileType = int(v)
+			if v, ok := ggufInt(val); ok {
+				meta.FileType = v
 			}
 		}
 
@@ -276,44 +370,60 @@ func ReadGGUFMetadata(path string) (*GGUFMetadata, error) {
 		}
 		switch key {
 		case arch + ".block_count":
-			if v, ok := val.(uint32); ok {
-				meta.Layers = int(v)
+			if v, ok := ggufInt(val); ok {
+				meta.Layers = v
 			}
 		case arch + ".embedding_length":
-			if v, ok := val.(uint32); ok {
-				meta.EmbeddingDim = int(v)
+			if v, ok := ggufInt(val); ok {
+				meta.EmbeddingDim = v
 			}
 		case arch + ".attention.head_count":
-			if v, ok := val.(uint32); ok {
-				meta.HeadCount = int(v)
+			if v, ok := ggufInt(val); ok {
+				meta.HeadCount = v
 			}
 		case arch + ".attention.head_count_kv":
-			if v, ok := val.(uint32); ok {
-				meta.KVHeadCount = int(v)
+			if v, ok := ggufInt(val); ok {
+				meta.KVHeadCount = v
+			}
+			// Per-layer form (hybrid attention): keep the whole array so
+			// kvCachePerSlot can account each layer's KV heads exactly.
+			if arr, ok := val.([]int64); ok {
+				perLayer := make([]int, len(arr))
+				for i, n := range arr {
+					perLayer[i] = int(n)
+				}
+				meta.HeadCountKVPerLayer = perLayer
 			}
 		case arch + ".context_length":
-			if v, ok := val.(uint32); ok {
-				meta.ContextSize = int(v)
+			if v, ok := ggufInt(val); ok {
+				meta.ContextSize = v
 			}
 		case arch + ".attention.sliding_window":
-			if v, ok := val.(uint32); ok {
-				meta.SlidingWindow = int(v)
+			if v, ok := ggufInt(val); ok {
+				meta.SlidingWindow = v
 			}
 		case arch + ".attention.shared_kv_layers":
-			if v, ok := val.(uint32); ok {
-				meta.SharedKVLayers = int(v)
+			if v, ok := ggufInt(val); ok {
+				meta.SharedKVLayers = v
 			}
 		case arch + ".attention.key_length":
-			if v, ok := val.(uint32); ok {
-				meta.KeyLength = int(v)
+			if v, ok := ggufInt(val); ok {
+				meta.KeyLength = v
 			}
 		case arch + ".attention.key_length_swa":
-			if v, ok := val.(uint32); ok {
-				meta.KeyLengthSWA = int(v)
+			if v, ok := ggufInt(val); ok {
+				meta.KeyLengthSWA = v
+			}
+		case arch + ".full_attention_interval":
+			if v, ok := ggufInt(val); ok {
+				meta.FullAttentionInterval = v
 			}
 		case arch + ".attention.sliding_window_pattern":
-			// Bool array: count SWA layers (true = SWA)
+			// Bool array: true = SWA layer. Keep the full pattern (so the
+			// per-layer path can tell which layers are full-attention) and
+			// the count (for the scalar fallback path).
 			if bools, ok := val.([]bool); ok {
+				meta.SWAPattern = bools
 				count := 0
 				for _, isSWA := range bools {
 					if isSWA {
@@ -344,6 +454,48 @@ const (
 	ggufTypeInt64   = 11
 	ggufTypeFloat64 = 12
 )
+
+// ggufIntType reports whether a GGUF value type is an integer scalar.
+func ggufIntType(t uint32) bool {
+	switch t {
+	case ggufTypeUint8, ggufTypeInt8, ggufTypeUint16, ggufTypeInt16,
+		ggufTypeUint32, ggufTypeInt32, ggufTypeUint64, ggufTypeInt64:
+		return true
+	}
+	return false
+}
+
+// ggufInt coerces a GGUF metadata value to an int. It accepts any integer
+// scalar type (writers are inconsistent about uint32 vs int32 vs uint64 for
+// the same key) and, for keys stored per-layer as an integer array (e.g.
+// gemma's head_count_kv), returns the first element — these arrays are
+// uniform across layers, so element 0 is representative. Returns ok=false
+// for non-integer values.
+func ggufInt(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case uint8:
+		return int(n), true
+	case int8:
+		return int(n), true
+	case uint16:
+		return int(n), true
+	case int16:
+		return int(n), true
+	case uint32:
+		return int(n), true
+	case int32:
+		return int(n), true
+	case uint64:
+		return int(n), true
+	case int64:
+		return int(n), true
+	case []int64:
+		if len(n) > 0 {
+			return int(n[0]), true
+		}
+	}
+	return 0, false
+}
 
 func readGGUFKV(r io.Reader, version uint32) (string, interface{}, error) {
 	key, err := readGGUFString(r)
@@ -433,6 +585,22 @@ func readGGUFValue(r io.Reader, valueType uint32) (interface{}, error) {
 				bools[j] = v != 0
 			}
 			return bools, nil
+		}
+		// Return integer arrays (needed for per-layer head_count_kv, which
+		// gemma and other hybrid-attention models store as one entry per
+		// layer rather than a scalar). Capped to avoid slurping large
+		// token-id / merge arrays we never read.
+		if ggufIntType(elemType) && count <= 4096 {
+			ints := make([]int64, count)
+			for j := uint64(0); j < count; j++ {
+				ev, err := readGGUFValue(r, elemType)
+				if err != nil {
+					return nil, err
+				}
+				n, _ := ggufInt(ev)
+				ints[j] = int64(n)
+			}
+			return ints, nil
 		}
 		// Skip other array contents
 		for j := uint64(0); j < count; j++ {

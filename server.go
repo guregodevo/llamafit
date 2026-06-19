@@ -24,13 +24,16 @@ type Config struct {
 	KVCacheType string // KV cache quantization type: f16, q8_0, q4_0 (default: q8_0)
 	BinaryPath  string // Path to llama-server binary (default: auto-detect)
 	// ReasoningFormat controls how llama-server handles a model's reasoning /
-	// "thinking" output (chat mode only). Empty/"none" (default) leaves thought
-	// content inline in the message — fine for non-reasoning models (Qwen2.5),
-	// but for a thinking-first model (e.g. Gemma's channel format) the raw
-	// control tokens then leak into the answer. "auto" makes llama-server
-	// EXTRACT reasoning into a separate reasoning_content field, leaving
-	// `content` as the clean final answer. Safe no-op for models that emit no
-	// reasoning, so callers can pass "auto" unconditionally.
+	// "thinking" output (chat mode only). "auto" makes llama-server EXTRACT
+	// reasoning into a separate reasoning_content field, leaving `content` as
+	// the clean final answer; "none" leaves thought content inline.
+	//
+	// Empty (the default) resolves to "auto", which is model-agnostic:
+	// llama-server detects the reasoning format from the model's own chat
+	// template, so a thinking model's <think>/channel tokens are extracted
+	// while a non-reasoning model is left untouched (verified no-op on
+	// Qwen2.5). No per-model configuration needed. Set "none" to force the
+	// raw output inline, or pass a specific format ("deepseek", etc.) through.
 	ReasoningFormat string
 	// DraftModelPath enables speculative decoding when set. The draft
 	// model proposes tokens that the main model verifies in batch — for
@@ -43,6 +46,26 @@ type Config struct {
 	// Default (empty) disables speculative decoding — pure single-model
 	// inference, behavior unchanged from older callers.
 	DraftModelPath string
+
+	// HFRepo loads the main model directly from a Hugging Face GGUF repo
+	// instead of ModelPath. Format: "user/repo[:quant]", e.g.
+	// "Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M". On first use the GGUF is
+	// downloaded to the local cache (shared with llama.cpp — see
+	// EnsureHFModel) and reused thereafter; New then auto-tunes against it
+	// exactly as for a local file. Mutually exclusive with ModelPath. When
+	// :quant is omitted, set HFFile or ensure the repo holds a single GGUF.
+	// First-boot download blocks New.
+	HFRepo string
+	// HFDraftRepo is the same as HFRepo for the speculative-decoding draft
+	// model (mirrors llama-server's -hfd / --hf-repo-draft). Populates
+	// DraftModelPath. Mutually exclusive with DraftModelPath.
+	HFDraftRepo string
+	// HFFile optionally names the exact GGUF file within HFRepo, overriding
+	// the :quant match (mirrors --hf-file).
+	HFFile string
+	// HFToken authenticates to gated/private HF repos (mirrors --hf-token).
+	// Falls back to the HF_TOKEN environment variable.
+	HFToken string
 	// Embeddings switches the server into embedding-service mode:
 	// llama-server is launched with --embeddings, exposes /v1/embeddings,
 	// and DOES NOT serve /v1/chat/completions. The model must be a
@@ -148,6 +171,35 @@ type Server struct {
 // Reads model metadata to auto-configure parallel slots if not specified.
 func New(cfg Config) (*Server, error) {
 	cfg.defaults()
+
+	// Hugging Face direct loading. Resolve repo specs to local cached files
+	// (downloading on first use) BEFORE the path/metadata checks below, so
+	// everything downstream sees an ordinary local GGUF and the auto-tuning
+	// is preserved. Each HF* field is mutually exclusive with its local
+	// counterpart to avoid ambiguity over which model wins.
+	if cfg.HFRepo != "" {
+		if cfg.ModelPath != "" {
+			return nil, fmt.Errorf("Config.HFRepo and Config.ModelPath are mutually exclusive")
+		}
+		path, err := EnsureHFModel(context.Background(), cfg.HFRepo, cfg.HFFile, cfg.HFToken)
+		if err != nil {
+			return nil, fmt.Errorf("resolve HF model %q: %w", cfg.HFRepo, err)
+		}
+		cfg.ModelPath = path
+	}
+	if cfg.HFDraftRepo != "" {
+		if cfg.DraftModelPath != "" {
+			return nil, fmt.Errorf("Config.HFDraftRepo and Config.DraftModelPath are mutually exclusive")
+		}
+		if cfg.Embeddings {
+			return nil, fmt.Errorf("Config.Embeddings and Config.HFDraftRepo are mutually exclusive (speculative decoding doesn't apply to embedding generation)")
+		}
+		path, err := EnsureHFModel(context.Background(), cfg.HFDraftRepo, "", cfg.HFToken)
+		if err != nil {
+			return nil, fmt.Errorf("resolve HF draft model %q: %w", cfg.HFDraftRepo, err)
+		}
+		cfg.DraftModelPath = path
+	}
 
 	if cfg.ModelPath == "" {
 		return nil, fmt.Errorf("model path is required")
@@ -390,12 +442,17 @@ func (s *Server) buildArgs() []string {
 		// endpoints aren't served.
 		args = append(args, "--embeddings", "--pooling", "mean")
 	} else {
-		// Chat mode reasoning handling. Default ("none") strips/leaves no
-		// think tags — correct for non-reasoning models and what every prior
-		// caller got. "auto" instead EXTRACTS reasoning into reasoning_content
-		// so a thinking-first model's control tokens (e.g. Gemma's channel
-		// format) don't leak into `content`.
-		if rf := s.cfg.ReasoningFormat; rf != "" && rf != "none" {
+		// Chat mode reasoning handling. Default ("") is "auto": llama-server
+		// detects a model's reasoning format from its own chat template and
+		// extracts the thinking into reasoning_content, keeping `content`
+		// clean. This is data-driven per model — no hardcoded arch list — and
+		// a safe no-op for non-reasoning models (nothing to extract). An
+		// explicit "none" forces the raw output inline.
+		rf := s.cfg.ReasoningFormat
+		if rf == "" {
+			rf = "auto"
+		}
+		if rf != "none" {
 			args = append(args, "--reasoning-format", rf)
 		} else {
 			args = append(args, "--reasoning-format", "none", "--reasoning", "off")
