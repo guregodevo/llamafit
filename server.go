@@ -46,6 +46,26 @@ type Config struct {
 	// Default (empty) disables speculative decoding — pure single-model
 	// inference, behavior unchanged from older callers.
 	DraftModelPath string
+
+	// HFRepo loads the main model directly from a Hugging Face GGUF repo
+	// instead of ModelPath. Format: "user/repo[:quant]", e.g.
+	// "Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M". On first use the GGUF is
+	// downloaded to the local cache (shared with llama.cpp — see
+	// EnsureHFModel) and reused thereafter; New then auto-tunes against it
+	// exactly as for a local file. Mutually exclusive with ModelPath. When
+	// :quant is omitted, set HFFile or ensure the repo holds a single GGUF.
+	// First-boot download blocks New.
+	HFRepo string
+	// HFDraftRepo is the same as HFRepo for the speculative-decoding draft
+	// model (mirrors llama-server's -hfd / --hf-repo-draft). Populates
+	// DraftModelPath. Mutually exclusive with DraftModelPath.
+	HFDraftRepo string
+	// HFFile optionally names the exact GGUF file within HFRepo, overriding
+	// the :quant match (mirrors --hf-file).
+	HFFile string
+	// HFToken authenticates to gated/private HF repos (mirrors --hf-token).
+	// Falls back to the HF_TOKEN environment variable.
+	HFToken string
 	// Embeddings switches the server into embedding-service mode:
 	// llama-server is launched with --embeddings, exposes /v1/embeddings,
 	// and DOES NOT serve /v1/chat/completions. The model must be a
@@ -151,6 +171,35 @@ type Server struct {
 // Reads model metadata to auto-configure parallel slots if not specified.
 func New(cfg Config) (*Server, error) {
 	cfg.defaults()
+
+	// Hugging Face direct loading. Resolve repo specs to local cached files
+	// (downloading on first use) BEFORE the path/metadata checks below, so
+	// everything downstream sees an ordinary local GGUF and the auto-tuning
+	// is preserved. Each HF* field is mutually exclusive with its local
+	// counterpart to avoid ambiguity over which model wins.
+	if cfg.HFRepo != "" {
+		if cfg.ModelPath != "" {
+			return nil, fmt.Errorf("Config.HFRepo and Config.ModelPath are mutually exclusive")
+		}
+		path, err := EnsureHFModel(context.Background(), cfg.HFRepo, cfg.HFFile, cfg.HFToken)
+		if err != nil {
+			return nil, fmt.Errorf("resolve HF model %q: %w", cfg.HFRepo, err)
+		}
+		cfg.ModelPath = path
+	}
+	if cfg.HFDraftRepo != "" {
+		if cfg.DraftModelPath != "" {
+			return nil, fmt.Errorf("Config.HFDraftRepo and Config.DraftModelPath are mutually exclusive")
+		}
+		if cfg.Embeddings {
+			return nil, fmt.Errorf("Config.Embeddings and Config.HFDraftRepo are mutually exclusive (speculative decoding doesn't apply to embedding generation)")
+		}
+		path, err := EnsureHFModel(context.Background(), cfg.HFDraftRepo, "", cfg.HFToken)
+		if err != nil {
+			return nil, fmt.Errorf("resolve HF draft model %q: %w", cfg.HFDraftRepo, err)
+		}
+		cfg.DraftModelPath = path
+	}
 
 	if cfg.ModelPath == "" {
 		return nil, fmt.Errorf("model path is required")

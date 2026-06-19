@@ -23,23 +23,43 @@ func main() {
 		kvCacheType = flag.String("kv-cache-type", "q8_0", "KV cache type: f16, q8_0, q4_0")
 		binaryPath  = flag.String("binary", "", "Path to llama-server binary")
 		draftModel  = flag.String("model-draft", "", "Optional draft GGUF for speculative decoding (1.5-2x throughput; must share main model's vocab)")
+		hfRepo      = flag.String("hf", "", "Load main model from a Hugging Face GGUF repo: user/repo[:quant] (downloads + caches on first use)")
+		hfDraft     = flag.String("hf-draft", "", "Load the speculative-decoding draft model from a Hugging Face GGUF repo: user/repo[:quant]")
+		hfFile      = flag.String("hf-file", "", "Exact GGUF filename within --hf repo (overrides :quant)")
+		hfToken     = flag.String("hf-token", "", "Hugging Face access token for gated repos (else $HF_TOKEN)")
 		inspect     = flag.Bool("inspect", false, "Print model info and exit")
 	)
 	flag.Parse()
 
-	if *modelPath == "" {
-		fmt.Fprintf(os.Stderr, "Usage: llamafit --model <path.gguf>\n\n")
+	if *modelPath == "" && *hfRepo == "" {
+		fmt.Fprintf(os.Stderr, "Usage: llamafit --model <path.gguf> | --hf <user/repo[:quant]>\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  llamafit --model model.gguf                    # auto-detect slots\n")
-		fmt.Fprintf(os.Stderr, "  llamafit --model model.gguf --parallel 8        # force 8 slots\n")
-		fmt.Fprintf(os.Stderr, "  llamafit --model model.gguf --inspect           # print model info\n")
+		fmt.Fprintf(os.Stderr, "  llamafit --model model.gguf                              # local file, auto-detect slots\n")
+		fmt.Fprintf(os.Stderr, "  llamafit --hf Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M       # pull from Hugging Face\n")
+		fmt.Fprintf(os.Stderr, "  llamafit --model model.gguf --inspect                   # print model info\n")
 		os.Exit(1)
 	}
 
+	// Graceful shutdown on Ctrl+C
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	// Resolve the model path: a local --model is read directly; --hf is
+	// downloaded/cached first so --inspect works the same for both.
+	resolvedPath := *modelPath
+	if *hfRepo != "" {
+		p, err := llamafit.EnsureHFModel(ctx, *hfRepo, *hfFile, *hfToken)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resolving HF model: %v\n", err)
+			os.Exit(1)
+		}
+		resolvedPath = p
+	}
+
 	// Read model metadata
-	meta, err := llamafit.ReadGGUFMetadata(*modelPath)
+	meta, err := llamafit.ReadGGUFMetadata(resolvedPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading model: %v\n", err)
 		os.Exit(1)
@@ -50,9 +70,10 @@ func main() {
 		return
 	}
 
-	// Create server
+	// Create server. The main model is already resolved to a local path;
+	// the draft can still come from HF via HFDraftRepo.
 	srv, err := llamafit.New(llamafit.Config{
-		ModelPath:  *modelPath,
+		ModelPath:  resolvedPath,
 		Host:       *host,
 		Port:       *port,
 		Parallel:   *parallel,
@@ -61,15 +82,13 @@ func main() {
 		KVCacheType:    *kvCacheType,
 		BinaryPath:     *binaryPath,
 		DraftModelPath: *draftModel,
+		HFDraftRepo:    *hfDraft,
+		HFToken:        *hfToken,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Graceful shutdown on Ctrl+C
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
 	if err := srv.Start(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
