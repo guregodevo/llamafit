@@ -1,0 +1,21 @@
+# Every pull request is reviewed by Memdoor's pr-review on a model that runs
+# inside the job (Ollama on the runner): no API key, no secret, nothing leaves
+# the runner. The job fails on a P0 only.
+name: pr-review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: guregodevo/memdoor-action@main
+        with:
+          workflow: pr-review
+          local-model: qwen3.5:9b
