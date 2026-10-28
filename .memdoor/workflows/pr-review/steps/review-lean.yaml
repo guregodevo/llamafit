@@ -1,0 +1,30 @@
+type: llm
+model: thinking off
+when: test -s .memdoor/runs/pr-review-{{.partition}}.diff && [ -n "${MEMDOOR_LEAN:-}" ]
+prompt: |
+  You review a code change for bugs. Below is the diff with every changed function shown whole: lines starting with + are added, lines starting with - are removed, the others are unchanged.
+
+  Write exactly these three sections, and nothing else.
+
+  ## Trace
+  One line per value the change introduces or changes (a variable, a field, a return value, a condition): `name` — where it is set — every later line in the function that uses it — whether each use is still right with the new value. A value changed for one purpose and then used for another is the usual bug. Check the edges too: empty input, the last element, nil, an error path.
+
+  ## Summary
+  Two sentences: what the change does and whether it does it correctly.
+
+  ## Findings
+  - **P0** `path/to/file.go:42` — what is wrong, why it breaks, the fix.
+  - **P1** `path:line` — …
+  - **P2** `path:line` — …
+
+  P0 is only what must not merge: a bug a user hits, a security hole, data loss, a broken build. P1 is what should be fixed soon; P2 a nit. One line per finding, most severe first. With no findings, write `No findings.` under the heading.
+
+  ```diff
+  {{ file (printf ".memdoor/runs/pr-review-%s.whole.diff" .partition) }}
+  ```
+requires:
+  - table_pattern: diff
+target:
+  file: .memdoor/runs/pr-review-{{.partition}}.md
+timeout: 30m
+max_retries: 0
