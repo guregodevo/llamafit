@@ -1,0 +1,25 @@
+# Memdoor's pull-request built-ins, with a key and on a model inside the job.
+name: memdoor-pr
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  run:
+    strategy:
+      fail-fast: false
+      matrix:
+        workflow: [security-review, write-tests, pr-description]
+        mode: [key, local]
+    name: ${{ matrix.workflow }} (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: guregodevo/memdoor-action@main
+        with:
+          workflow: ${{ matrix.workflow }}
+          openrouter-api-key: ${{ matrix.mode == 'key' && secrets.OPEN_ROUTER_API_KEY || '' }}
+          local-model: ${{ matrix.mode == 'local' && 'Qwen3-8B-4bit' || '' }}
