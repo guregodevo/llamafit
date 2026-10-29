@@ -22,7 +22,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: guregodevo/memdoor-action@main
+      - uses: guregodevo/memdoor-action@v1
         with:
           workflow: explain-failure
           openrouter-api-key: ${{ matrix.mode == 'key' && secrets.OPEN_ROUTER_API_KEY || '' }}
