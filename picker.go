@@ -39,7 +39,8 @@ func PickModel(dir string) (string, error) {
 		bestSize int64
 	)
 	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".gguf") {
+		// Some uploads ship as MODEL.GGUF: match the extension in any case.
+		if !strings.HasSuffix(strings.ToLower(e.Name()), ".gguf") {
 			continue
 		}
 		info, err := e.Info()
