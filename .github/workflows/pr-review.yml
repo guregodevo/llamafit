@@ -1,0 +1,20 @@
+name: pr-review
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  review:
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [local, key]
+    name: review (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: guregodevo/memdoor-action@v1
+        with:
+          workflow: pr-review
+          local-model: ${{ matrix.mode == 'local' && 'qwen3.5:9b' || '' }}
+          openrouter-api-key: ${{ matrix.mode == 'key' && secrets.OPEN_ROUTER_API_KEY || '' }}
