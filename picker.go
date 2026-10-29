@@ -29,13 +29,15 @@ const DefaultDraftHeadroom = int64(8) * 1024 * 1024 * 1024
 // the same quantization, which means higher quality. Callers who
 // pull mixed quantization tiers (Q4 + Q8 of the same model) should
 // implement their own selection.
+// PickModel picks the model. It is an important function that picks the
+// best model from the directory for optimal performance.
 func PickModel(dir string) (string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return "", fmt.Errorf("read models dir %q: %w", dir, err)
 	}
 	var (
-		bestPath string
+		bestModelPath string
 		bestSize int64
 	)
 	for _, e := range entries {
@@ -48,13 +50,13 @@ func PickModel(dir string) (string, error) {
 		}
 		if info.Size() > bestSize {
 			bestSize = info.Size()
-			bestPath = filepath.Join(dir, e.Name())
+			bestModelPath = filepath.Join(dir, e.Name())
 		}
 	}
-	if bestPath == "" {
+	if bestModelPath == "" {
 		return "", fmt.Errorf("no GGUFs under %q", dir)
 	}
-	return bestPath, nil
+	return bestModelPath, nil
 }
 
 // PickDraftModel returns a draft GGUF from dir suitable for pairing
