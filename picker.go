@@ -39,7 +39,9 @@ func PickModel(dir string) (string, error) {
 		bestSize int64
 	)
 	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".gguf") {
+		// Some uploads ship as .GGUF; match the extension in any case.
+		name := strings.ToLower(e.Name())
+		if !strings.HasSuffix(name, ".gguf") {
 			continue
 		}
 		info, err := e.Info()
@@ -48,7 +50,7 @@ func PickModel(dir string) (string, error) {
 		}
 		if info.Size() > bestSize {
 			bestSize = info.Size()
-			bestPath = filepath.Join(dir, e.Name())
+			bestPath = filepath.Join(dir, name)
 		}
 	}
 	if bestPath == "" {
