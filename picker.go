@@ -46,7 +46,7 @@ func PickModel(dir string) (string, error) {
 		if err != nil {
 			continue
 		}
-		if info.Size() > bestSize {
+		if bestPath == "" || info.Size() < bestSize {
 			bestSize = info.Size()
 			bestPath = filepath.Join(dir, e.Name())
 		}
