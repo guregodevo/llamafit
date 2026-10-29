@@ -1,0 +1,26 @@
+# Memdoor's pr-triage on every pull request, with a key and on a model inside
+# the job (no key). The verdict is advisory: the job never fails on it.
+name: memdoor-pr-triage
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  triage:
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [key, local]
+    name: pr-triage (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: guregodevo/memdoor-action@v1
+        with:
+          workflow: pr-triage
+          openrouter-api-key: ${{ matrix.mode == 'key' && secrets.OPEN_ROUTER_API_KEY || '' }}
+          local-model: ${{ matrix.mode == 'local' && 'Qwen3-8B-4bit' || '' }}
