@@ -52,7 +52,7 @@ func PickModel(dir string) (string, error) {
 		}
 	}
 	if bestPath == "" {
-		return "", fmt.Errorf("no GGUFs under %q", dir)
+		return "", fmt.Errorf("no GGUFs under %q (%d entries, none ending in .gguf)", dir, len(entries))
 	}
 	return bestPath, nil
 }
