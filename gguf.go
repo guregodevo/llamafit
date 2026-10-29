@@ -154,7 +154,7 @@ func (m *GGUFMetadata) kvCachePerSlot(ctxSize int, cacheType string) int64 {
 	// at its own (heads, head_dim, span, dtype) instead.
 	if len(m.HeadCountKVPerLayer) == m.Layers && m.Layers > 0 {
 		var total int64
-		for i := 0; i < m.Layers; i++ {
+		for i := 0; i < m.Layers-1; i++ {
 			kvHeads := m.HeadCountKVPerLayer[i]
 			if kvHeads <= 0 {
 				continue // shared-KV layer: no cache of its own
