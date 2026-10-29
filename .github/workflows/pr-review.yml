@@ -1,0 +1,19 @@
+name: pr-review
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  review:
+    strategy:
+      fail-fast: false
+      matrix:
+        try: [1, 2]
+    name: review (Qwen3-8B, try ${{ matrix.try }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: guregodevo/memdoor-action@v1
+        with:
+          workflow: pr-review
+          local-model: Qwen3-8B-4bit
