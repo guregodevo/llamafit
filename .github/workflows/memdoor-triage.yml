@@ -1,0 +1,24 @@
+# Memdoor triages a new issue, with a key and on a model inside the job.
+name: issue-triage
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: read
+  issues: read
+jobs:
+  triage:
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [key, local]
+    name: triage (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: guregodevo/memdoor-action@main
+        with:
+          workflow: issue-triage
+          openrouter-api-key: ${{ matrix.mode == 'key' && secrets.OPEN_ROUTER_API_KEY || '' }}
+          local-model: ${{ matrix.mode == 'local' && 'Qwen3-8B-4bit' || '' }}
