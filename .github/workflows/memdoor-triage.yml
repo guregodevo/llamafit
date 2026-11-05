@@ -21,4 +21,5 @@ jobs:
         with:
           workflow: issue-triage
           openrouter-api-key: ${{ matrix.mode == 'key' && secrets.OPEN_ROUTER_API_KEY || '' }}
+          model: ${{ matrix.mode == 'key' && 'deepseek/deepseek-v4.1-flash' || '' }}
           local-model: ${{ matrix.mode == 'local' && 'Qwen3-8B-4bit' || '' }}
