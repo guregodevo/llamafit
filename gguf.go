@@ -206,10 +206,10 @@ func (m *GGUFMetadata) kvCachePerSlot(ctxSize int, cacheType string) int64 {
 		nonSWABytes = int64(float64(elements) * KVBytesPerElement(cacheType))
 	}
 
-	// SWA layers: sliding window context (llama.cpp allocates 2x window), always F16
+	// SWA layers: sliding window context (window + ubatch lookahead), always F16
 	swaBytes := int64(0)
 	if swaLayers > 0 {
-		swaCtx := int64(m.SlidingWindow) * 2
+		swaCtx := int64(swaCells(ctxSize, m.SlidingWindow))
 		headDim := int64(m.headDimSWA())
 		elements := int64(swaLayers) * 2 * swaCtx * int64(m.KVHeadCount) * headDim
 		swaBytes = int64(float64(elements) * KVBytesPerElement("f16"))
