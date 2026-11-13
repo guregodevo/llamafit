@@ -510,3 +510,51 @@ func TestOptimalSlots_CacheTypeComparison(t *testing.T) {
 		t.Errorf("q8_0 (%d) should yield more slots than f16 (%d)", q8, f16)
 	}
 }
+
+// TestKVCachePerSlot_ScalarWindowNoPattern pins the scalar sliding-window
+// path for a GGUF that declares only "llama.attention.sliding_window" and
+// no sliding_window_pattern array — what Mistral and Gemma files carry.
+// SWALayerCount stays 0 there, so the window must be applied to the layers
+// themselves: with 32 layers, window 4096 and ctx 16384 the SWA layers cost
+// 32 * 2 * (2*4096) * 8 KV heads * 128 dim * 2.0 (f16) = 1,073,741,824
+// bytes, below the 1,140,850,688 of the same model with no window.
+func TestKVCachePerSlot_ScalarWindowNoPattern(t *testing.T) {
+	base := GGUFMetadata{
+		Layers:       32,
+		EmbeddingDim: 4096,
+		HeadCount:    32,
+		KVHeadCount:  8,
+	}
+	noSWA := base
+	scalarSWA := base
+	scalarSWA.SlidingWindow = 4096 // scalar key only — no SWAPattern, SWALayerCount stays 0
+
+	kvNoSWA := noSWA.kvCachePerSlot(16384, "q8_0")
+	kvSWA := scalarSWA.kvCachePerSlot(16384, "q8_0")
+
+	if got, want := kvSWA, int64(1_073_741_824); got != want {
+		t.Errorf("scalar-window kvCachePerSlot = %d (%d MB), want %d (%d MB)",
+			got, got/(1024*1024), want, want/(1024*1024))
+	}
+	if kvSWA >= kvNoSWA {
+		t.Errorf("scalar sliding_window must shrink the KV cache: %d MB >= %d MB",
+			kvSWA/(1024*1024), kvNoSWA/(1024*1024))
+	}
+
+	// The per-layer path must agree: a file that stores head_count_kv as an
+	// array but carries no sliding_window_pattern still declares every layer
+	// windowed, so it must not size them all at full context either.
+	// It sizes a windowed layer with swaCells (window + one 512-token ubatch):
+	// 32 * 4608 cells * 2(K+V) * 8 heads * 128 dim * 2.0(f16) = 603,979,776.
+	perLayer := scalarSWA
+	perLayer.HeadCountKVPerLayer = []int{8, 8, 8, 8, 8, 8, 8, 8,
+		8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8}
+	if got, want := perLayer.kvCachePerSlot(16384, "q8_0"), int64(603_979_776); got != want {
+		t.Errorf("per-layer scalar-window kvCachePerSlot = %d (%d MB), want %d (%d MB)",
+			got, got/(1024*1024), want, want/(1024*1024))
+	}
+	if got := perLayer.kvCachePerSlot(16384, "q8_0"); got >= kvNoSWA {
+		t.Errorf("per-layer scalar sliding_window must shrink the KV cache: %d MB >= %d MB",
+			got/(1024*1024), kvNoSWA/(1024*1024))
+	}
+}

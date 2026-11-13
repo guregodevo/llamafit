@@ -159,7 +159,10 @@ func (m *GGUFMetadata) kvCachePerSlot(ctxSize int, cacheType string) int64 {
 			if kvHeads <= 0 {
 				continue // shared-KV layer: no cache of its own
 			}
-			isSWA := m.SlidingWindow > 0 && i < len(m.SWAPattern) && m.SWAPattern[i]
+			// With no pattern array the scalar window covers every layer
+			// (llama.cpp's convention: no per-layer pattern, all layers
+			// windowed), so don't silently size them all at full context.
+			isSWA := m.SlidingWindow > 0 && (len(m.SWAPattern) == 0 || (i < len(m.SWAPattern) && m.SWAPattern[i]))
 			var cells, headDim int64
 			var bytes float64
 			if isSWA {
@@ -188,14 +191,25 @@ func (m *GGUFMetadata) kvCachePerSlot(ctxSize int, cacheType string) int64 {
 	}
 
 	// Sliding window architecture
+	// A scalar sliding_window key with no sliding_window_pattern array means
+	// the file declares the window for every layer (Mistral and Gemma GGUFs
+	// that carry only "llama.attention.sliding_window" do this). Without
+	// this fallback SWALayerCount stays 0, nonSWATotal = Layers - 0, and
+	// every layer is sized at full context — the window is parsed but never
+	// affects the estimate. Only fall back when the file gave no pattern at
+	// all: a pattern whose entries are all false really is full attention.
+	swaCount := m.SWALayerCount
+	if swaCount == 0 && len(m.SWAPattern) == 0 && m.Layers > 0 {
+		swaCount = m.Layers
+	}
 	// Shared KV layers are distributed proportionally across SWA and non-SWA layers
-	nonSWATotal := m.Layers - m.SWALayerCount
+	nonSWATotal := m.Layers - swaCount
 	sharedSWA := 0
 	if m.Layers > 0 {
-		sharedSWA = int(math.Round(float64(m.SharedKVLayers) * float64(m.SWALayerCount) / float64(m.Layers)))
+		sharedSWA = int(math.Round(float64(m.SharedKVLayers) * float64(swaCount) / float64(m.Layers)))
 	}
 	sharedNonSWA := m.SharedKVLayers - sharedSWA
-	swaLayers := m.SWALayerCount - sharedSWA
+	swaLayers := swaCount - sharedSWA
 	nonSWALayers := nonSWATotal - sharedNonSWA
 
 	// Non-SWA layers: full context, uses requested cache type
