@@ -134,3 +134,13 @@ func TestPickDraftModel_NoMainPath(t *testing.T) {
 		t.Errorf("PickDraftModel with empty mainPath returned %q, want \"\"", got)
 	}
 }
+
+func TestPickModel_UpperCaseExtension(t *testing.T) {
+	dir := t.TempDir()
+	want := writeFakeGGUF(t, dir, "MODEL.GGUF", 2<<30)
+	writeFakeGGUF(t, dir, "small.gguf", 1<<30)
+	got, err := PickModel(dir)
+	if err != nil || got != want {
+		t.Fatalf("PickModel = %q, %v; want %q", got, err, want)
+	}
+}
