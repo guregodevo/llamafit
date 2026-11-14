@@ -144,3 +144,47 @@ func TestPickModel_UpperCaseExtension(t *testing.T) {
 		t.Fatalf("PickModel = %q, %v; want %q", got, err, want)
 	}
 }
+
+// A cache may keep a second name (a symlink) for the very same file.
+// That alias is the main model itself and must not become the draft.
+func TestPickDraftModel_SkipsSymlinkAliasOfMain(t *testing.T) {
+	dir := t.TempDir()
+	main := writeFakeGGUF(t, dir, "main-7b.gguf", 21<<30)
+	if err := os.Symlink(main, filepath.Join(dir, "main-7b.gguf.link.gguf")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if got := PickDraftModel(main, dir, 0); got != "" {
+		t.Errorf("PickDraftModel returned the main model via its symlink alias: %q", got)
+	}
+}
+
+// A draft reached through a symlink must be sized by its target, so a
+// qualifying one still qualifies (lstat would report the link length).
+func TestPickDraftModel_SymlinkedDraftIsMeasured(t *testing.T) {
+	dir := t.TempDir()
+	main := writeFakeGGUF(t, dir, "main-7b.gguf", 21<<30)
+	sub := filepath.Join(dir, "cache")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", sub, err)
+	}
+	target := writeFakeGGUF(t, sub, "draft-1_5b.gguf", 1<<30)
+	link := filepath.Join(dir, "draft-link.gguf")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if got := PickDraftModel(main, dir, 0); got != link {
+		t.Errorf("PickDraftModel = %q, want the symlinked qualifying draft %q", got, link)
+	}
+}
+
+// A broken symlink with a .gguf name must be skipped, not picked.
+func TestPickDraftModel_SkipsBrokenSymlink(t *testing.T) {
+	dir := t.TempDir()
+	main := writeFakeGGUF(t, dir, "main-7b.gguf", 21<<30)
+	if err := os.Symlink(filepath.Join(dir, "gone.gguf"), filepath.Join(dir, "broken.gguf")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if got := PickDraftModel(main, dir, 0); got != "" {
+		t.Errorf("PickDraftModel picked a broken symlink: %q", got)
+	}
+}
