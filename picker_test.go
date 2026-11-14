@@ -144,3 +144,40 @@ func TestPickModel_UpperCaseExtension(t *testing.T) {
 		t.Fatalf("PickModel = %q, %v; want %q", got, err, want)
 	}
 }
+
+// A model reached through a symlink must be measured by the size of the
+// file it points to, not by the length of the link: model caches symlink
+// big files in, and a 9 GiB draft is over the 1/3 limit of a 21 GiB main
+// however it is reached.
+func TestPickDraftModel_SkipsOversizedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	main := writeFakeGGUF(t, dir, "main-32b.gguf", 21<<30) // limit = 7 GiB
+	store := t.TempDir()
+	big := writeFakeGGUF(t, store, "qwen2.5-14b.gguf", 9<<30)
+	if err := os.Symlink(big, filepath.Join(dir, "qwen2.5-14b.gguf")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if got := PickDraftModel(main, dir, 0); got != "" {
+		t.Errorf("PickDraftModel picked an oversized symlinked draft: %q", got)
+	}
+}
+
+// A qualifying model behind a symlink is still a candidate, and a dangling
+// link is skipped rather than erroring or being picked.
+func TestPickDraftModel_PicksQualifyingSymlinkAndSkipsBroken(t *testing.T) {
+	dir := t.TempDir()
+	main := writeFakeGGUF(t, dir, "main-32b.gguf", 21<<30)
+	store := t.TempDir()
+	want := filepath.Join(dir, "qwen2.5-1_5b.gguf")
+	if err := os.Symlink(writeFakeGGUF(t, store, "qwen2.5-1_5b.gguf", 1<<30), want); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "gone.gguf"), filepath.Join(dir, "broken.gguf")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if got := PickDraftModel(main, dir, 0); got != want {
+		t.Errorf("PickDraftModel = %q, want %q", got, want)
+	}
+}
