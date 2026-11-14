@@ -516,8 +516,10 @@ func TestOptimalSlots_CacheTypeComparison(t *testing.T) {
 // no sliding_window_pattern array — what Mistral and Gemma files carry.
 // SWALayerCount stays 0 there, so the window must be applied to the layers
 // themselves: with 32 layers, window 4096 and ctx 16384 the SWA layers cost
-// 32 * 2 * (2*4096) * 8 KV heads * 128 dim * 2.0 (f16) = 1,073,741,824
-// bytes, below the 1,140,850,688 of the same model with no window.
+// 32 * 2 * (4096 + 512) * 8 KV heads * 128 dim * 2.0 (f16) = 603,979,776
+// bytes, below the 1,140,850,688 of the same model with no window. A
+// windowed layer holds window + one 512-token ubatch (swaCells), not 2x the
+// window: #31 fixed that, and this test still pinned the old number.
 func TestKVCachePerSlot_ScalarWindowNoPattern(t *testing.T) {
 	base := GGUFMetadata{
 		Layers:       32,
@@ -532,7 +534,7 @@ func TestKVCachePerSlot_ScalarWindowNoPattern(t *testing.T) {
 	kvNoSWA := noSWA.kvCachePerSlot(16384, "q8_0")
 	kvSWA := scalarSWA.kvCachePerSlot(16384, "q8_0")
 
-	if got, want := kvSWA, int64(1_073_741_824); got != want {
+	if got, want := kvSWA, int64(603_979_776); got != want {
 		t.Errorf("scalar-window kvCachePerSlot = %d (%d MB), want %d (%d MB)",
 			got, got/(1024*1024), want, want/(1024*1024))
 	}
