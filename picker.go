@@ -119,6 +119,11 @@ func PickDraftModel(mainPath, dir string, headroomBytes int64) string {
 		if err != nil {
 			continue
 		}
+		// Another name (symlink, hardlink) for the main model itself
+		// is the main model, however it is spelled.
+		if os.SameFile(mainInfo, info) {
+			continue
+		}
 		if info.Size() > maxDraftSize {
 			continue
 		}
