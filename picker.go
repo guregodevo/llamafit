@@ -110,8 +110,18 @@ func PickDraftModel(mainPath, dir string, headroomBytes int64) string {
 		if p == mainPath {
 			continue
 		}
-		info, err := e.Info()
+		// Stat, not e.Info(): the latter is an lstat, so a symlink
+		// reports the length of the link, not of the model it points
+		// at. A cache that keeps a second name for the main model
+		// would otherwise look like a tiny draft. Stat also makes a
+		// broken link fail here and get skipped.
+		info, err := os.Stat(p)
 		if err != nil {
+			continue
+		}
+		// Another name (symlink, hardlink) for the main model itself
+		// is the main model, however it is spelled.
+		if os.SameFile(mainInfo, info) {
 			continue
 		}
 		if info.Size() > maxDraftSize {
