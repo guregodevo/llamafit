@@ -97,6 +97,8 @@ draftPath := llamafit.PickDraftModel(mainPath, "/Users/me/.yourapp/models",
 //   or when (main + draft + 8 GiB) would exceed AvailableMemory()
 ```
 
+Only files ending in `.gguf` count, and the largest one wins; split models (`-00001-of-00003.gguf`) are not joined, so keep one file per model in the directory.
+
 The memory guard on `PickDraftModel` is the load-bearing bit: on a thrashing host, speculative decoding inverts into a 4-8x slowdown (observed: 16 GB Mac with 7B + 1.5B paired, ~80 MB free). Pass `0` for the headroom to disable the guard on dedicated inference hosts.
 
 ## Served API
