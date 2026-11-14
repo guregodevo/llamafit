@@ -110,7 +110,12 @@ func PickDraftModel(mainPath, dir string, headroomBytes int64) string {
 		if p == mainPath {
 			continue
 		}
-		info, err := e.Info()
+		// Stat the path, not the directory entry: e.Info() is an
+		// lstat, so a symlinked model (as model caches lay them out)
+		// would be measured by the length of its link rather than by
+		// the size of the file it points to. os.Stat also fails on a
+		// dangling link, which skips it.
+		info, err := os.Stat(p)
 		if err != nil {
 			continue
 		}
